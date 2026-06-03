@@ -1,0 +1,452 @@
+# Technical Architecture Document
+
+## Product Name
+
+Lead Hero Health Check Tool
+
+## Architecture Summary
+
+The tool is a private internal web app that reads data from HighLevel through Private Integration Tokens, analyzes account health, stores reports in its own database, and posts reviewed comments to ClickUp.
+
+HighLevel is treated as a read-only evidence source. The app must not send outbound communication or mutate CRM records.
+
+```text
+User
+  |
+Web App
+  |
+Backend API
+  |
+Database
+  |
+HighLevel API (read-only)
+ClickUp API (write comments)
+AI Classification Service (blast reply analysis)
+```
+
+## Recommended Tech Stack
+
+### Frontend
+
+Next.js with React and TypeScript.
+
+Reason:
+
+- Good for internal dashboards
+- Supports server-side API routes if needed
+- Strong ecosystem for forms, tables, and authenticated apps
+
+### Backend
+
+Next.js API routes or a separate Node.js/TypeScript backend.
+
+For MVP, a single Next.js app is enough. If the tool grows into scheduled jobs and heavier processing, the backend can be split later.
+
+### Database
+
+Postgres.
+
+Recommended hosted option: Supabase or Neon.
+
+Reason:
+
+- Structured client/report data
+- Good relational model
+- Easy querying for reports, blast analyses, and audit history
+
+### ORM
+
+Prisma.
+
+Reason:
+
+- Clear schema
+- Type-safe database access
+- Easy migrations
+
+### Authentication
+
+Clerk, Supabase Auth, or Auth.js.
+
+For MVP, email/password or Google login is enough. Access should be restricted to internal team members only.
+
+### AI Reply Classification
+
+OpenAI API or another approved LLM provider.
+
+Used only for analyzing conversation replies, not for sending messages.
+
+### Hosting
+
+Vercel for the web app.
+
+Background jobs can use:
+
+- Vercel Cron for simple scheduled checks
+- Trigger.dev, Inngest, or a queue worker if checks become long-running
+
+## HighLevel Integration
+
+### Authentication
+
+Use HighLevel Private Integration Token per client/location.
+
+Required request headers:
+
+```http
+Authorization: Bearer <PRIVATE_INTEGRATION_TOKEN>
+Version: 2021-07-28
+Content-Type: application/json
+```
+
+Some endpoints may use newer versions, but the app should centralize the HighLevel API version in config.
+
+### HighLevel Access Boundary
+
+Allowed:
+
+- Read contacts
+- Read conversations/messages
+- Read workflows
+- Read opportunities
+- Read calendar events
+- Read tags/custom fields
+- Read call records
+
+Not allowed:
+
+- Send SMS
+- Send email
+- Place calls
+- Add contacts to workflows
+- Create/update/delete contacts
+- Add/remove tags
+- Create/update opportunities
+- Edit workflows
+- Trigger automations
+
+### Recommended Read-Only Scopes
+
+Exact scope names should be confirmed in the HighLevel UI/API docs during implementation, but the PIT should be limited to read-only equivalents of:
+
+```text
+contacts.readonly
+conversations.readonly
+conversations/message.readonly
+workflows.readonly
+opportunities.readonly
+calendars/events.readonly
+locations/tags.readonly
+custom-fields.readonly
+```
+
+## ClickUp Integration
+
+### Authentication
+
+Use ClickUp API token or OAuth depending on the account setup.
+
+### Required Action
+
+Post a comment to a configured ClickUp task.
+
+### Stored Per Client
+
+- ClickUp task ID
+- Optional ClickUp workspace/list/folder metadata
+
+## Database Schema
+
+### users
+
+Stores app users.
+
+Fields:
+
+- id
+- name
+- email
+- role
+- created_at
+- updated_at
+
+### clients
+
+Stores each Lead Hero client/account.
+
+Fields:
+
+- id
+- name
+- ghl_location_id
+- ghl_private_integration_token_encrypted
+- clickup_task_id
+- timezone
+- status
+- created_at
+- updated_at
+
+### routing_setups
+
+Stores routing audit settings per client.
+
+Fields:
+
+- id
+- client_id
+- staff_contact_id
+- staff_phone_number
+- expected_phrase
+- expected_delay_minutes
+- active
+- created_at
+- updated_at
+
+Notes:
+
+- One client can have multiple staff notification contacts.
+- Default expected phrase is `New form submission`.
+
+### monthly_checks
+
+Stores monthly or custom date-range health reports.
+
+Fields:
+
+- id
+- client_id
+- date_start
+- date_end
+- status
+- routing_working
+- automations_firing
+- attribution_intact
+- leads_received
+- calls_answered
+- calls_missed
+- blast_summary_id
+- issues
+- next_month_focus
+- generated_comment
+- posted_to_clickup
+- clickup_comment_id
+- created_by_user_id
+- created_at
+- updated_at
+
+### monthly_check_evidence
+
+Stores supporting evidence for a monthly check.
+
+Fields:
+
+- id
+- monthly_check_id
+- evidence_type
+- source
+- summary
+- raw_reference
+- created_at
+
+Example evidence types:
+
+- routing_message_count
+- attribution_coverage
+- call_summary
+- workflow_status
+- blast_summary
+
+### blast_analyses
+
+Stores standalone blast analysis runs.
+
+Fields:
+
+- id
+- client_id
+- date_start
+- date_end
+- reply_tag
+- workflow_name_or_id
+- message_phrase
+- total_replied_contacts
+- positive_count
+- negative_count
+- neutral_count
+- opt_out_count
+- needs_review_count
+- summary
+- created_by_user_id
+- created_at
+- updated_at
+
+### blast_reply_classifications
+
+Stores per-contact blast reply analysis.
+
+Fields:
+
+- id
+- blast_analysis_id
+- contact_id
+- contact_name
+- conversation_id
+- classification
+- summary
+- evidence_message_ids
+- created_at
+
+Classifications:
+
+- positive
+- negative
+- neutral
+- opt_out
+- needs_review
+
+### api_audit_logs
+
+Stores internal app audit events.
+
+Fields:
+
+- id
+- user_id
+- client_id
+- action
+- target_type
+- target_id
+- status
+- message
+- created_at
+
+Examples:
+
+- monthly_check_generated
+- blast_analysis_generated
+- clickup_comment_posted
+- highlevel_api_error
+
+## Folder Structure
+
+```text
+src/
+  app/
+    clients/
+    routing-setup/
+    blast-analyzer/
+    monthly-check/
+    reports/
+    settings/
+  components/
+    layout/
+    forms/
+    tables/
+    status/
+    charts/
+  lib/
+    highlevel/
+      client.ts
+      contacts.ts
+      conversations.ts
+      workflows.ts
+      calls.ts
+    clickup/
+      client.ts
+      comments.ts
+    ai/
+      classifyBlastReply.ts
+    db/
+      prisma.ts
+    security/
+      encryption.ts
+      permissions.ts
+  server/
+    services/
+      routingCheckService.ts
+      monthlyCheckService.ts
+      blastAnalysisService.ts
+      clickupPostingService.ts
+    jobs/
+      monthlyCheckJob.ts
+  prisma/
+    schema.prisma
+  styles/
+```
+
+## Core Services
+
+### routingCheckService
+
+Responsibilities:
+
+- Pull new leads for the selected date range
+- Pull outbound workflow messages to staff notification contacts
+- Match messages containing `New form submission`
+- Calculate routing status
+
+### monthlyCheckService
+
+Responsibilities:
+
+- Pull leads received
+- Check routing evidence
+- Check workflow metadata
+- Check attribution coverage
+- Pull call records
+- Attach selected blast analysis
+- Generate Green/Yellow/Red status
+- Generate ClickUp comment text
+
+### blastAnalysisService
+
+Responsibilities:
+
+- Search contacts by reply tag and date range where supported
+- Pull conversations for matching contacts
+- Identify relevant replies
+- Classify replies with AI
+- Save analysis results
+
+### clickupPostingService
+
+Responsibilities:
+
+- Post final comment to ClickUp task
+- Store ClickUp comment ID
+- Prevent duplicate posting unless user confirms
+
+## Environment Variables
+
+```text
+DATABASE_URL=
+APP_ENCRYPTION_KEY=
+CLICKUP_API_TOKEN=
+OPENAI_API_KEY=
+HIGHLEVEL_API_VERSION=2021-07-28
+NEXT_PUBLIC_APP_URL=
+AUTH_SECRET=
+```
+
+Client-specific HighLevel PITs should be encrypted in the database, not stored as plain text environment variables.
+
+## API Reliability Notes
+
+- HighLevel Smart Lists may not be directly accessible as saved list IDs through the public API.
+- Contact search should be used to recreate filters where possible.
+- Workflow metadata is available, but full node-level workflow inspection should not be assumed.
+- Message export may identify source as workflow, but workflow ID may not be reliably exposed in documented response fields.
+- Blast workflow recipient counts may require inference from reply tags, message timing, or future instrumentation.
+
+## Version One Build Order
+
+1. Set up app shell, auth, and database.
+2. Build Clients module.
+3. Build HighLevel read-only API client.
+4. Build Routing Setup.
+5. Build Routing Check.
+6. Build Monthly Check base report.
+7. Build call and attribution summaries.
+8. Build Blast Analyzer.
+9. Build ClickUp posting.
+10. Add saved reports and audit logs.
