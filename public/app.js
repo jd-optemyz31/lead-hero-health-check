@@ -581,7 +581,7 @@ function renderMonthly() {
       </section>
       ${latest ? renderReport(latest) : renderEmptyMonthly()}
     </div>
-  `, "Monthly Check", "Generate the Lead Hero software health report and ClickUp comment.");
+  `, "Monthly Check", "Generate, review, and post the Lead Hero software health report.");
 
   document.querySelector("#monthly-form").addEventListener("submit", async (event) => {
     event.preventDefault();
