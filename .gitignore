@@ -2,3 +2,6 @@ data/store.json
 work/*.log
 work/*.png
 node_modules/
+.env
+.env.*
+!.env.example

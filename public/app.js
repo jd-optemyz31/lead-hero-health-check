@@ -1,4 +1,4 @@
-const icons = {
+﻿const icons = {
   clients: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
   routing: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>`,
   blast: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 11 18-5-5 18-4-8-9-5Z"/><path d="m12 16 4-4"/></svg>`,
@@ -26,6 +26,7 @@ const state = {
   blastAnalyses: [],
   reports: [],
   settings: {},
+  auth: { required: false, user: null },
   selectedReportId: "",
   toast: ""
 };
@@ -34,41 +35,19 @@ const app = document.querySelector("#app");
 const localStoreKey = "leadHeroHealthCheckStore";
 
 function seedStore() {
-  const now = new Date().toISOString();
   return {
-    clients: [
-      {
-        id: "sample-client",
-        name: "Lead Hero Sample Account",
-        locationId: "sample-location-id",
-        clickupTaskId: "",
-        timezone: "America/New_York",
-        tokenPreview: "local",
-        hasToken: true,
-        createdAt: now,
-        updatedAt: now
-      }
-    ],
-    routingSetups: [
-      {
-        id: "sample-routing",
-        clientId: "sample-client",
-        staffContactId: "staff-contact-001",
-        staffPhone: "+1 555 010 1400",
-        expectedPhrase: "New form submission",
-        expectedDelayMinutes: 10,
-        active: true,
-        createdAt: now,
-        updatedAt: now
-      }
-    ],
+    clients: [],
+    routingSetups: [],
     blastAnalyses: [],
     reports: [],
     settings: {
       highLevelApiVersion: "2021-07-28",
       clickupConnected: false,
-      safeMode: true
-    }
+      safeMode: true,
+      storage: "Local",
+      authRequired: false
+    },
+    auth: { required: false, user: { email: "local-dev", role: "admin" } }
   };
 }
 
@@ -112,12 +91,19 @@ async function api(path, options = {}) {
   try {
     const response = await fetch(path, {
       headers: { "content-type": "application/json" },
+      credentials: "same-origin",
       ...options
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Request failed");
+    if (!response.ok) {
+      const error = new Error(payload.error || "Request failed");
+      error.detail = payload.detail || "";
+      error.fromServer = true;
+      throw error;
+    }
     return payload;
   } catch (error) {
+    if (error.fromServer) throw error;
     return localApi(path, options, error);
   }
 }
@@ -131,6 +117,7 @@ function localApi(path, options = {}, originalError) {
   if (method === "GET" && path === "/api/bootstrap") return store;
 
   if (method === "POST" && path === "/api/clients") {
+    if (!body.pitToken) throw new Error("A read-only HighLevel Private Integration Token is required when adding a client.");
     const client = {
       id: body.id || crypto.randomUUID(),
       name: body.name,
@@ -162,6 +149,18 @@ function localApi(path, options = {}, originalError) {
     store.routingSetups.push(setup);
     writeLocalStore(store);
     return { routingSetups: store.routingSetups };
+  }
+
+  if (method === "POST" && path === "/api/highlevel/test") {
+    const client = store.clients.find((item) => item.id === body.clientId);
+    if (!client) throw new Error("Client not found.");
+    if (!client.hasToken) throw new Error("HighLevel token is missing for this client.");
+    return {
+      ok: true,
+      message: "Local preview connection check passed. Start the server with a saved PIT to test HighLevel live.",
+      checked: "local-preview",
+      sampleCount: 0
+    };
   }
 
   if (method === "POST" && path === "/api/blasts/run") {
@@ -213,6 +212,7 @@ function localBlastAnalysis(client, body) {
     optOutCount: 1,
     needsReviewCount: 1,
     summary: "18 contacts matched the reply tag during the selected window. 9 appear positive and 1 needs human review.",
+    source: "sample",
     replies: [
       ["Avery Johnson", "Positive", "Contact showed interest and should be followed up."],
       ["Morgan Ellis", "Neutral", "Reply was short and unclear."],
@@ -255,7 +255,7 @@ function localMonthlyReport(store, client, body) {
   const blastBlock = blast
     ? `Blasts (if applicable):\nBlast(s) Sent: Yes\nType: SMS\nSends: Not available\nDelivery Rate: Not available\nReplies / Engagement: ${blast.totalRepliedContacts} replies (${blast.positiveCount} positive, ${blast.neutralCount} neutral, ${blast.negativeCount} negative, ${blast.optOutCount} opt-out)`
     : "Blasts (if applicable):\nBlast(s) Sent: No\nType:\nSends:\nDelivery Rate:\nReplies / Engagement:";
-  const generatedComment = `Lead Hero (Software) - 🟢 Green - ${label} ${client.name}
+  const generatedComment = `Lead Hero (Software) - Green - ${label} ${client.name}
 
 System Health:
 Routing Working: Yes
@@ -283,6 +283,7 @@ ${metrics.nextMonthFocus}`;
     metrics,
     blastAnalysisId: blast?.id || "",
     generatedComment,
+    source: "sample",
     postedToClickUp: false,
     clickupCommentId: "",
     evidence: [
@@ -323,6 +324,11 @@ function clientOptions(selected = currentClientId()) {
   return state.clients.map((client) => `<option value="${client.id}" ${client.id === selected ? "selected" : ""}>${escapeHtml(client.name)}</option>`).join("");
 }
 
+function requireClientOptions(selected = currentClientId()) {
+  const options = clientOptions(selected);
+  return options || `<option value="">Add a client first</option>`;
+}
+
 function escapeHtml(value = "") {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -338,7 +344,18 @@ function badge(value) {
   return `<span class="badge ${className}">${escapeHtml(value)}</span>`;
 }
 
+function sourceBadge(source) {
+  return badge(source === "live" ? "Live HighLevel" : "Sample");
+}
+
+function errorMessage(error) {
+  return error.detail ? `${error.message} ${error.detail}` : error.message;
+}
+
 function renderShell(content, title, subtitle, actions = "") {
+  const authActions = state.auth?.user
+    ? `<span class="user-chip">${escapeHtml(state.auth.user.email || "User")} | ${escapeHtml(state.auth.user.role || "viewer")}</span><button class="btn secondary small" type="button" data-logout>Log out</button>`
+    : "";
   app.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar">
@@ -354,7 +371,7 @@ function renderShell(content, title, subtitle, actions = "") {
             <h1>${title}</h1>
             <p>${subtitle}</p>
           </div>
-          <div class="top-actions">${actions}</div>
+          <div class="top-actions">${actions}${authActions}</div>
         </header>
         <div class="content">${content}</div>
       </main>
@@ -365,9 +382,23 @@ function renderShell(content, title, subtitle, actions = "") {
   document.querySelectorAll("[data-nav]").forEach((button) => {
     button.addEventListener("click", () => setActive(button.dataset.nav));
   });
+  document.querySelectorAll("[data-logout]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) });
+      } finally {
+        state.auth = { required: true, user: null };
+        render();
+      }
+    });
+  });
 }
 
 function render() {
+  if (state.auth?.required && !state.auth?.user) {
+    renderLogin();
+    return;
+  }
   const views = {
     clients: renderClients,
     routing: renderRouting,
@@ -379,6 +410,36 @@ function render() {
   views[state.active]();
 }
 
+function renderLogin() {
+  app.innerHTML = `
+    <main class="login-screen">
+      <section class="login-panel">
+        <img src="assets/lead-hero-logo.png" alt="Lead Hero" />
+        <h1>Lead Hero Health Check</h1>
+        <p>Sign in with an approved internal account to continue.</p>
+        <form id="login-form" class="grid">
+          <div class="field"><label>Email</label><input name="email" type="email" autocomplete="email" required></div>
+          <div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password" required></div>
+          <button class="btn primary" type="submit">${icons.play} Sign in</button>
+        </form>
+      </section>
+      <div class="toast ${state.toast ? "" : "hidden"}">${escapeHtml(state.toast)}</div>
+    </main>
+  `;
+  document.querySelector("#login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      const payload = await api("/api/auth/login", { method: "POST", body: JSON.stringify(body) });
+      state.auth = { required: true, user: payload.user };
+      showToast("Signed in.");
+      await load();
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
+  });
+}
+
 function renderClients() {
   const rows = state.clients.map((client) => `
     <tr>
@@ -387,6 +448,7 @@ function renderClients() {
       <td>${client.hasToken ? badge("Token saved") : badge("Missing token")}</td>
       <td>${client.clickupTaskId ? escapeHtml(client.clickupTaskId) : badge("Missing ClickUp")}</td>
       <td>${new Date(client.updatedAt).toLocaleDateString()}</td>
+      <td><button class="btn secondary small" type="button" data-test-highlevel="${client.id}" ${client.hasToken ? "" : "disabled"}>${icons.play} Test</button></td>
     </tr>
   `).join("");
 
@@ -398,13 +460,13 @@ function renderClients() {
         </div>
         <form id="client-form" class="grid">
           <div class="form-grid">
-            <div class="field"><label>Client name</label><input name="name" required value="Lead Hero Sample Account"></div>
+            <div class="field"><label>Client name</label><input name="name" required placeholder="Client account name"></div>
             <div class="field"><label>Timezone</label><input name="timezone" value="America/New_York"></div>
             <div class="field"><label>HighLevel location ID</label><input name="locationId" required placeholder="Location/sub-account ID"></div>
             <div class="field"><label>ClickUp task ID</label><input name="clickupTaskId" placeholder="ClickUp client task ID"></div>
-            <div class="field"><label>Read-only Private Integration Token</label><input name="pitToken" type="password" placeholder="Stored encrypted locally"></div>
+            <div class="field"><label>Read-only Private Integration Token</label><input name="pitToken" type="password" required placeholder="Encrypted server-side after saving"></div>
           </div>
-          <p class="muted">Use read-only HighLevel scopes only. The app does not include any HighLevel write endpoints.</p>
+          <p class="muted">Use read-only HighLevel scopes only. Tokens are never shown again after saving and must not be stored in code or Railway variables per client.</p>
           <div class="actions"><button class="btn primary" type="submit">${icons.save} Save client</button></div>
         </form>
       </section>
@@ -414,8 +476,8 @@ function renderClients() {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Client</th><th>Location ID</th><th>HighLevel token</th><th>ClickUp task</th><th>Updated</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="5"><div class="empty">Add your first client to start running Lead Hero health checks.</div></td></tr>`}</tbody>
+            <thead><tr><th>Client</th><th>Location ID</th><th>HighLevel token</th><th>ClickUp task</th><th>Updated</th><th>Connection</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="6"><div class="empty">Add your first client to start running Lead Hero health checks.</div></td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -425,9 +487,23 @@ function renderClients() {
   document.querySelector("#client-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = await api("/api/clients", { method: "POST", body: JSON.stringify(body) });
-    state.clients = payload.clients;
-    showToast("Client saved.");
+    try {
+      const payload = await api("/api/clients", { method: "POST", body: JSON.stringify(body) });
+      state.clients = payload.clients;
+      showToast("Client saved.");
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
+  });
+  document.querySelectorAll("[data-test-highlevel]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        const payload = await api("/api/highlevel/test", { method: "POST", body: JSON.stringify({ clientId: button.dataset.testHighlevel }) });
+        showToast(payload.message || "HighLevel connection succeeded.");
+      } catch (error) {
+        showToast(errorMessage(error));
+      }
+    });
   });
 }
 
@@ -454,13 +530,13 @@ function renderRouting() {
         </div>
         <form id="routing-form" class="grid">
           <div class="form-grid">
-            <div class="field"><label>Client</label><select name="clientId" required>${clientOptions()}</select></div>
+            <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions()}</select></div>
             <div class="field"><label>Staff contact ID</label><input name="staffContactId" placeholder="Optional if phone is enough"></div>
             <div class="field"><label>Staff phone number</label><input name="staffPhone" required placeholder="+1 555 010 1400"></div>
             <div class="field"><label>Expected phrase</label><input name="expectedPhrase" value="New form submission"></div>
             <div class="field"><label>Expected delay window</label><select name="expectedDelayMinutes"><option value="5">5 minutes</option><option value="10" selected>10 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></div>
           </div>
-          <div class="actions"><button class="btn primary" type="submit">${icons.save} Save routing setup</button></div>
+          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.save} Save routing setup</button></div>
         </form>
       </section>
       <section class="panel">
@@ -480,9 +556,13 @@ function renderRouting() {
   document.querySelector("#routing-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = await api("/api/routing", { method: "POST", body: JSON.stringify(body) });
-    state.routingSetups = payload.routingSetups;
-    showToast("Routing setup saved.");
+    try {
+      const payload = await api("/api/routing", { method: "POST", body: JSON.stringify(body) });
+      state.routingSetups = payload.routingSetups;
+      showToast("Routing setup saved.");
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
   });
 }
 
@@ -507,14 +587,14 @@ function renderBlast() {
         </div>
         <form id="blast-form" class="grid">
           <div class="form-grid three">
-            <div class="field"><label>Client</label><select name="clientId" required>${clientOptions()}</select></div>
+            <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions()}</select></div>
             <div class="field"><label>Start date</label><input type="date" name="dateStart" required value="${firstDayOfMonth()}"></div>
             <div class="field"><label>End date</label><input type="date" name="dateEnd" required value="${todayIso()}"></div>
             <div class="field"><label>Reply tag</label><input name="replyTag" required value="Replied to Blast"></div>
             <div class="field"><label>Optional workflow name or ID</label><input name="workflowName" placeholder="BLAST - May Offer"></div>
             <div class="field"><label>Optional blast message phrase</label><input name="messagePhrase" placeholder="Offer, event, or message phrase"></div>
           </div>
-          <div class="actions"><button class="btn primary" type="submit">${icons.play} Run analysis</button></div>
+          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.play} Run analysis</button></div>
         </form>
       </section>
       ${latest ? renderBlastResult(latest, rows) : `<div class="empty">No blast analysis has been run yet.</div>`}
@@ -524,9 +604,13 @@ function renderBlast() {
   document.querySelector("#blast-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
-    state.blastAnalyses = payload.blastAnalyses;
-    showToast("Blast analysis saved.");
+    try {
+      const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
+      state.blastAnalyses = payload.blastAnalyses;
+      showToast(`${payload.analysis.source === "live" ? "Live HighLevel" : "Sample"} blast analysis saved.`);
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
   });
 }
 
@@ -543,7 +627,7 @@ function renderBlastResult(analysis, rows) {
     <section class="panel">
       <div class="panel-header">
         <div><h2>Conversation classifications</h2><p>${escapeHtml(analysis.summary)}</p></div>
-        ${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}
+        <div class="badge-group">${sourceBadge(analysis.source)}${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}</div>
       </div>
       <div class="table-wrap">
         <table>
@@ -571,12 +655,12 @@ function renderMonthly() {
         </div>
         <form id="monthly-form" class="grid">
           <div class="form-grid three">
-            <div class="field"><label>Client</label><select name="clientId" required>${clientOptions(client?.id)}</select></div>
+            <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions(client?.id)}</select></div>
             <div class="field"><label>Start date</label><input type="date" name="dateStart" required value="${firstDayOfMonth()}"></div>
             <div class="field"><label>End date</label><input type="date" name="dateEnd" required value="${lastDayOfMonth()}"></div>
             <div class="field"><label>Saved blast analysis</label><select name="blastAnalysisId">${blastOptions}</select></div>
           </div>
-          <div class="actions"><button class="btn primary" type="submit">${icons.play} Run monthly check</button>${action}</div>
+          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.play} Run monthly check</button>${action}</div>
         </form>
       </section>
       ${latest ? renderReport(latest) : renderEmptyMonthly()}
@@ -586,10 +670,14 @@ function renderMonthly() {
   document.querySelector("#monthly-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = await api("/api/monthly/run", { method: "POST", body: JSON.stringify(body) });
-    state.reports = payload.reports;
-    state.selectedReportId = payload.report.id;
-    showToast("Monthly check generated.");
+    try {
+      const payload = await api("/api/monthly/run", { method: "POST", body: JSON.stringify(body) });
+      state.reports = payload.reports;
+      state.selectedReportId = payload.report.id;
+      showToast(`${payload.report.source === "live" ? "Live HighLevel" : "Sample"} monthly check generated.`);
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
   });
   document.querySelectorAll("[data-post-clickup]").forEach((button) => {
     button.addEventListener("click", () => postClickUp(button.dataset.postClickup));
@@ -602,9 +690,10 @@ function renderReport(report) {
     <section class="status-hero">
       <div>
         <h2>Lead Hero status: ${badge(report.status)}</h2>
-        <p class="muted">${escapeHtml(report.clientName)} · ${escapeHtml(report.dateStart)} to ${escapeHtml(report.dateEnd)} · ${report.postedToClickUp ? "Posted to ClickUp" : "Draft report"}</p>
+        <div class="source-row">${sourceBadge(report.source)}</div>
+        <p class="muted">${escapeHtml(report.clientName)} | ${escapeHtml(report.dateStart)} to ${escapeHtml(report.dateEnd)} | ${report.postedToClickUp ? "Posted to ClickUp" : "Draft report"}</p>
       </div>
-      <div class="status-mark">${report.status === "Green" ? "●" : report.status === "Yellow" ? "!" : "×"}</div>
+      <div class="status-mark">${report.status === "Green" ? "G" : report.status === "Yellow" ? "!" : "X"}</div>
     </section>
     <section class="grid six">
       ${metricCard("Routing Working", m.routingWorking, `${m.routingMessages} notification matches`)}
@@ -617,6 +706,7 @@ function renderReport(report) {
     <section class="grid two">
       <div class="panel">
         <div class="panel-header"><div><h2>Evidence</h2><p>Read-only checks used for the report.</p></div></div>
+        <div class="source-row">${sourceBadge(report.source)}</div>
         <div class="evidence-list">
           ${report.evidence.map((item) => `<div class="evidence-item"><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join("")}
         </div>
@@ -650,9 +740,13 @@ function metricCard(label, value, foot) {
 
 async function postClickUp(reportId) {
   if (!window.confirm("Post this reviewed report to the configured ClickUp task?")) return;
-  const payload = await api("/api/clickup/post", { method: "POST", body: JSON.stringify({ reportId }) });
-  state.reports = payload.reports;
-  showToast(payload.report.clickupCommentId === "local-preview" ? "Marked as posted locally. Add CLICKUP_API_TOKEN to post live." : "Posted to ClickUp.");
+  try {
+    const payload = await api("/api/clickup/post", { method: "POST", body: JSON.stringify({ reportId }) });
+    state.reports = payload.reports;
+    showToast(payload.report.clickupCommentId === "local-preview" ? "Marked as posted locally. Add CLICKUP_API_TOKEN to post live." : "Posted to ClickUp.");
+  } catch (error) {
+    showToast(errorMessage(error));
+  }
 }
 
 function renderReports() {
@@ -702,6 +796,8 @@ function renderSettings() {
         <div class="grid">
           ${metricCard("HighLevel API version", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
           ${metricCard("ClickUp connection", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "CLICKUP_API_TOKEN detected" : "Set CLICKUP_API_TOKEN for live posting")}
+          ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Supabase-backed production storage" : "Local JSON development storage")}
+          ${metricCard("Authentication", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth enforced" : "Auth disabled for local development")}
           ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}
         </div>
       </section>
@@ -712,3 +808,4 @@ function renderSettings() {
 load().catch((error) => {
   app.innerHTML = `<div class="content"><div class="panel"><h1>Unable to load app</h1><p>${escapeHtml(error.message)}</p></div></div>`;
 });
+

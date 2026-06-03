@@ -16,10 +16,21 @@ Users should log in before accessing the app.
 
 Recommended MVP authentication:
 
-- Google login restricted to approved company domains, or
-- Email/password with enforced invite-only access
+- Supabase Auth with Google login restricted to approved company domains, or
+- Supabase Auth email/password with enforced invite-only access
 
 Public signup should not be enabled.
+
+Supabase Auth is the preferred MVP option if the app also uses Supabase Postgres. It keeps authentication, database identity, and Row-Level Security in one stack. Use Supabase Auth for login and session management, then enforce app roles in the database and backend.
+
+Required authentication settings:
+
+- Disable public signup unless explicitly approved.
+- Require invite-only users or approved company-domain Google login.
+- Require MFA for Admin users before production client data is added.
+- Keep Admin, Operator / CAM, and Viewer roles server-enforced; do not rely on frontend-only role checks.
+- Set short session lifetimes or enforced re-authentication for sensitive actions such as adding/replacing HighLevel PIT tokens.
+- Never expose Supabase service role keys to the browser.
 
 ## User Roles
 
@@ -157,6 +168,17 @@ Private Integration Tokens must:
 - Never be sent to the browser after initial entry
 - Be removable or replaceable by admins
 
+Client-specific HighLevel PITs should be entered through an authenticated Admin-only Clients screen. They should not be hardcoded, committed to Git, stored in frontend files, or placed in Railway environment variables per client. Railway variables are for app-wide secrets only.
+
+Recommended production storage:
+
+- Store the client record in Postgres.
+- Store `ghl_private_integration_token_encrypted` only, never plaintext.
+- Encrypt before writing to the database using `APP_ENCRYPTION_KEY`.
+- Decrypt only on the server at the moment a read-only HighLevel API request is made.
+- Return only `hasToken` and a short token preview to the browser.
+- Log token create/replace/remove events without logging the token value.
+
 ### ClickUp API Token
 
 The ClickUp token should be stored as an environment variable or encrypted secret.
@@ -169,7 +191,43 @@ Use a server-side encryption key:
 APP_ENCRYPTION_KEY
 ```
 
-This key must not be committed to code.
+`APP_ENCRYPTION_KEY` is the master secret the server uses to encrypt and decrypt stored client-level secrets, especially HighLevel Private Integration Tokens. It is not a HighLevel key, ClickUp key, or OpenAI key. It is an app-owned encryption secret.
+
+Production requirements:
+
+- Store `APP_ENCRYPTION_KEY` only in Railway environment variables or another approved secret manager.
+- Do not commit it to code, `.env.example`, logs, screenshots, docs, or support tickets.
+- Generate it as a long random secret, at least 32 bytes of entropy. A 64-character hex string from a cryptographic random generator is acceptable.
+- Keep the same value across deploys. If it changes, existing encrypted HighLevel PITs cannot be decrypted.
+- Rotate it only with a planned re-encryption process: decrypt existing tokens with the old key, encrypt with the new key, then remove the old key.
+- Use separate encryption keys for development, staging, and production.
+
+Example generation command:
+
+```bash
+openssl rand -hex 32
+```
+
+For the current Node implementation, the app hashes `APP_ENCRYPTION_KEY` into an AES-256-GCM key. AES-GCM provides authenticated encryption, so tampered ciphertext fails to decrypt.
+
+## Railway Secret Policy
+
+Railway variables should store app-wide secrets and configuration only:
+
+- `APP_ENCRYPTION_KEY`
+- `DATABASE_URL`
+- `CLICKUP_API_TOKEN`
+- `OPENAI_API_KEY`
+- `HIGHLEVEL_API_VERSION`
+- `AUTH_SECRET`
+- `AUTH_REQUIRED`
+- `ADMIN_EMAILS`
+- Supabase project URL and anon key if Supabase Auth is used
+- Supabase service role key only if needed by server-side code, never exposed to the browser
+
+Do not store one Railway variable per client HighLevel PIT. Client PITs belong in the encrypted database field managed by the app.
+
+For the current MVP, set `AUTH_REQUIRED=true` in Railway. `SUPABASE_SERVICE_ROLE_KEY` must be available only to server-side code and must never be exposed through frontend JavaScript or any `NEXT_PUBLIC_` variable. `ADMIN_EMAILS` should contain only trusted internal admin email addresses and is used for initial admin access before app users are fully managed in the database.
 
 ## Row-Level Access Rules
 
@@ -181,6 +239,16 @@ If using Supabase or another database with row-level security, apply these rules
 - Operators can create monthly checks and blast analyses for assigned clients.
 - Viewers can read reports for assigned clients only.
 - Audit logs are read-only for non-admins.
+
+Supabase Row-Level Security should be enabled on all production tables containing client data, tokens, reports, evidence, audit logs, or user-role mappings. The backend should still enforce authorization checks even when RLS is enabled.
+
+Minimum table policy expectations:
+
+- `clients`: Admins can create/update; assigned users can read limited client metadata; encrypted token fields should not be selected by browser-facing queries.
+- `routing_setups`: Admins can create/update; assigned Operators can read.
+- `monthly_checks` and `blast_analyses`: assigned Operators can create/read; Viewers can read; only allowed roles can post reviewed reports.
+- `api_audit_logs`: insert from server only; read by Admin only.
+- Token fields: server-side access only. Do not expose encrypted tokens to frontend queries just because they are encrypted.
 
 ## Error Handling
 
@@ -295,6 +363,10 @@ Recommended MVP policy:
 
 - App has authentication enabled.
 - Public signup is disabled.
+- Supabase schema in `supabase/schema.sql` has been applied.
+- `AUTH_REQUIRED=true` is set in Railway.
+- `ADMIN_EMAILS` contains the initial trusted admin account only.
+- Supabase service role key is server-only and never sent to the browser.
 - HighLevel tokens are encrypted.
 - No HighLevel write endpoints exist in code.
 - ClickUp posting requires user review.

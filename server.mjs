@@ -10,38 +10,36 @@ const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const storePath = path.join(dataDir, "store.json");
 const port = Number(process.env.PORT || 5173);
+const highLevelBaseUrl = process.env.HIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com";
+const defaultHighLevelApiVersion = process.env.HIGHLEVEL_API_VERSION || "2021-07-28";
+const supabaseUrl = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabaseConfigured = Boolean(supabaseUrl && supabaseServiceRoleKey);
+const authRequired = process.env.AUTH_REQUIRED === "true" || supabaseConfigured;
+const cookieSecure = process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === "true" : process.env.NODE_ENV === "production";
+const adminEmails = new Set(
+  String(process.env.ADMIN_EMAILS || "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean)
+);
+const highLevelReadAllowlist = new Set([
+  "GET /contacts/",
+  "POST /contacts/search",
+  "GET /conversations/search",
+  "GET /conversations/messages/export",
+  "GET /workflows",
+  "GET /workflows/"
+]);
 
 const defaultStore = {
-  clients: [
-    {
-      id: "sample-client",
-      name: "Lead Hero Sample Account",
-      locationId: "sample-location-id",
-      clickupTaskId: "",
-      timezone: "America/New_York",
-      tokenPreview: "read-only token not saved",
-      tokenCiphertext: "",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-  ],
-  routingSetups: [
-    {
-      id: "sample-routing",
-      clientId: "sample-client",
-      staffContactId: "staff-contact-001",
-      staffPhone: "+1 555 010 1400",
-      expectedPhrase: "New form submission",
-      expectedDelayMinutes: 10,
-      active: true,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-  ],
+  clients: [],
+  routingSetups: [],
   blastAnalyses: [],
   reports: [],
   settings: {
-    highLevelApiVersion: "2021-07-28",
+    highLevelApiVersion: defaultHighLevelApiVersion,
     clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
     safeMode: true
   }
@@ -57,6 +55,12 @@ const mimeTypes = {
   ".jpeg": "image/jpeg",
   ".svg": "image/svg+xml; charset=utf-8",
   ".ico": "image/x-icon"
+};
+
+const roleRank = {
+  viewer: 1,
+  operator: 2,
+  admin: 3
 };
 
 function json(res, status, body) {
@@ -81,12 +85,14 @@ async function ensureStore() {
 }
 
 async function readStore() {
+  if (supabaseConfigured) return readSupabaseStore();
   await ensureStore();
   const raw = await readFile(storePath, "utf8");
   return JSON.parse(raw);
 }
 
 async function writeStore(store) {
+  if (supabaseConfigured) return writeSupabaseStore(store);
   await mkdir(dataDir, { recursive: true });
   await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
 }
@@ -94,6 +100,198 @@ async function writeStore(store) {
 function publicClient(client) {
   const { tokenCiphertext, ...safe } = client;
   return { ...safe, hasToken: Boolean(tokenCiphertext) };
+}
+
+function clientFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    locationId: row.ghl_location_id,
+    clickupTaskId: row.clickup_task_id || "",
+    timezone: row.timezone || "America/New_York",
+    tokenPreview: row.ghl_private_integration_token_preview || "",
+    tokenCiphertext: row.ghl_private_integration_token_encrypted || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function clientToRow(client) {
+  return {
+    id: client.id,
+    name: client.name,
+    ghl_location_id: client.locationId,
+    clickup_task_id: client.clickupTaskId || "",
+    timezone: client.timezone || "America/New_York",
+    ghl_private_integration_token_preview: client.tokenPreview || "",
+    ghl_private_integration_token_encrypted: client.tokenCiphertext || "",
+    created_at: client.createdAt,
+    updated_at: client.updatedAt
+  };
+}
+
+function routingFromRow(row) {
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    staffContactId: row.staff_contact_id || "",
+    staffPhone: row.staff_phone || "",
+    expectedPhrase: row.expected_phrase || "New form submission",
+    expectedDelayMinutes: Number(row.expected_delay_minutes || 10),
+    active: row.active !== false,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function routingToRow(setup) {
+  return {
+    id: setup.id,
+    client_id: setup.clientId,
+    staff_contact_id: setup.staffContactId || "",
+    staff_phone: setup.staffPhone || "",
+    expected_phrase: setup.expectedPhrase || "New form submission",
+    expected_delay_minutes: Number(setup.expectedDelayMinutes || 10),
+    active: setup.active !== false,
+    created_at: setup.createdAt,
+    updated_at: setup.updatedAt
+  };
+}
+
+function blastFromRow(row) {
+  return {
+    ...(row.payload || {}),
+    id: row.id,
+    clientId: row.client_id,
+    createdAt: row.created_at
+  };
+}
+
+function blastToRow(analysis) {
+  return {
+    id: analysis.id,
+    client_id: analysis.clientId,
+    date_start: analysis.dateStart,
+    date_end: analysis.dateEnd,
+    reply_tag: analysis.replyTag || "",
+    source: analysis.source || "sample",
+    payload: analysis,
+    created_at: analysis.createdAt
+  };
+}
+
+function reportFromRow(row) {
+  return {
+    ...(row.payload || {}),
+    id: row.id,
+    clientId: row.client_id,
+    createdAt: row.created_at,
+    postedToClickUp: Boolean(row.posted_to_clickup),
+    clickupCommentId: row.clickup_comment_id || row.payload?.clickupCommentId || ""
+  };
+}
+
+function reportToRow(report) {
+  return {
+    id: report.id,
+    client_id: report.clientId,
+    date_start: report.dateStart,
+    date_end: report.dateEnd,
+    status: report.status,
+    source: report.source || "sample",
+    posted_to_clickup: Boolean(report.postedToClickUp),
+    clickup_comment_id: report.clickupCommentId || "",
+    payload: report,
+    created_at: report.createdAt
+  };
+}
+
+async function supabaseRest(pathname, { method = "GET", query = {}, body, prefer = "" } = {}) {
+  if (!supabaseConfigured) throw new Error("Supabase is not configured.");
+  const url = new URL(`${supabaseUrl}/rest/v1/${pathname}`);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "apikey": supabaseServiceRoleKey,
+      "authorization": `Bearer ${supabaseServiceRoleKey}`,
+      "content-type": "application/json",
+      "accept": "application/json",
+      ...(prefer ? { "prefer": prefer } : {})
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await response.text();
+  const payload = text ? parseJsonMaybe(text) : null;
+  if (!response.ok) {
+    const error = new Error("Supabase database request failed.");
+    error.status = response.status;
+    error.detail = sanitizeApiDetail(typeof payload === "string" ? payload : payload?.message || text);
+    throw error;
+  }
+  return payload;
+}
+
+async function readSupabaseStore() {
+  const [clients, routingSetups, blastAnalyses, reports] = await Promise.all([
+    supabaseRest("clients", { query: { select: "*", order: "created_at.asc" } }),
+    supabaseRest("routing_setups", { query: { select: "*", order: "created_at.asc" } }),
+    supabaseRest("blast_analyses", { query: { select: "*", order: "created_at.desc" } }),
+    supabaseRest("monthly_reports", { query: { select: "*", order: "created_at.desc" } })
+  ]);
+
+  return {
+    clients: clients.map(clientFromRow),
+    routingSetups: routingSetups.map(routingFromRow),
+    blastAnalyses: blastAnalyses.map(blastFromRow),
+    reports: reports.map(reportFromRow),
+    settings: {
+      highLevelApiVersion: defaultHighLevelApiVersion,
+      clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+      safeMode: true,
+      storage: "Supabase",
+      authRequired
+    }
+  };
+}
+
+async function writeSupabaseStore(store) {
+  const requests = [];
+  if (store.clients?.length) {
+    requests.push(supabaseRest("clients", {
+      method: "POST",
+      query: { on_conflict: "id" },
+      body: store.clients.map(clientToRow),
+      prefer: "resolution=merge-duplicates"
+    }));
+  }
+  if (store.routingSetups?.length) {
+    requests.push(supabaseRest("routing_setups", {
+      method: "POST",
+      query: { on_conflict: "id" },
+      body: store.routingSetups.map(routingToRow),
+      prefer: "resolution=merge-duplicates"
+    }));
+  }
+  if (store.blastAnalyses?.length) {
+    requests.push(supabaseRest("blast_analyses", {
+      method: "POST",
+      query: { on_conflict: "id" },
+      body: store.blastAnalyses.map(blastToRow),
+      prefer: "resolution=merge-duplicates"
+    }));
+  }
+  if (store.reports?.length) {
+    requests.push(supabaseRest("monthly_reports", {
+      method: "POST",
+      query: { on_conflict: "id" },
+      body: store.reports.map(reportToRow),
+      prefer: "resolution=merge-duplicates"
+    }));
+  }
+  await Promise.all(requests);
 }
 
 function encryptionKey() {
@@ -110,11 +308,129 @@ function encryptToken(value) {
   return `${iv.toString("base64")}.${tag.toString("base64")}.${encrypted.toString("base64")}`;
 }
 
+function decryptToken(value) {
+  if (!value) return "";
+  const [ivRaw, tagRaw, encryptedRaw] = String(value).split(".");
+  if (!ivRaw || !tagRaw || !encryptedRaw) return "";
+  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivRaw, "base64"));
+  decipher.setAuthTag(Buffer.from(tagRaw, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encryptedRaw, "base64")),
+    decipher.final()
+  ]).toString("utf8");
+}
+
 function tokenPreview(value) {
   if (!value) return "";
   const clean = String(value).trim();
   if (clean.length <= 8) return "saved";
   return `${clean.slice(0, 4)}...${clean.slice(-4)}`;
+}
+
+function parseCookies(req) {
+  return Object.fromEntries(
+    String(req.headers.cookie || "")
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        if (index === -1) return [part, ""];
+        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      })
+  );
+}
+
+function setCookie(res, name, value, { maxAge = 3600 } = {}) {
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${maxAge}`
+  ];
+  if (cookieSecure) parts.push("Secure");
+  res.setHeader("set-cookie", parts.join("; "));
+}
+
+function clearCookie(res, name) {
+  setCookie(res, name, "", { maxAge: 0 });
+}
+
+async function supabaseAuth(pathname, { method = "GET", body, token } = {}) {
+  if (!supabaseUrl || !supabaseAnonKey) throw new Error("Supabase Auth is not configured.");
+  const response = await fetch(`${supabaseUrl}/auth/v1/${pathname}`, {
+    method,
+    headers: {
+      "apikey": supabaseAnonKey,
+      "authorization": token ? `Bearer ${token}` : `Bearer ${supabaseAnonKey}`,
+      "content-type": "application/json"
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await response.text();
+  const payload = text ? parseJsonMaybe(text) : {};
+  if (!response.ok) {
+    const error = new Error("Supabase Auth request failed.");
+    error.status = response.status;
+    error.detail = sanitizeApiDetail(typeof payload === "string" ? payload : payload?.msg || payload?.message || text);
+    throw error;
+  }
+  return payload;
+}
+
+async function loadAppUser(user) {
+  const email = String(user.email || "").toLowerCase();
+  if (adminEmails.has(email)) {
+    return { id: user.id, email, role: "admin", active: true, source: "ADMIN_EMAILS" };
+  }
+  if (!supabaseConfigured) {
+    return { id: user.id, email, role: "admin", active: true, source: "local" };
+  }
+  const rows = await supabaseRest("app_users", {
+    query: {
+      select: "id,auth_user_id,email,role,active",
+      auth_user_id: `eq.${user.id}`,
+      limit: "1"
+    }
+  });
+  const appUser = rows[0];
+  if (!appUser?.active) return null;
+  return {
+    id: appUser.auth_user_id || user.id,
+    email: appUser.email || email,
+    role: appUser.role || "viewer",
+    active: true,
+    source: "app_users"
+  };
+}
+
+async function getCurrentUser(req) {
+  if (!authRequired) return { id: "local-dev", email: "local-dev", role: "admin", active: true, source: "local-dev" };
+  const token = parseCookies(req).lh_session;
+  if (!token) return null;
+  try {
+    const payload = await supabaseAuth("user", { token });
+    const user = payload.user || payload;
+    if (!user?.id) return null;
+    return loadAppUser(user);
+  } catch {
+    return null;
+  }
+}
+
+function canAccess(user, minimumRole) {
+  if (!authRequired) return true;
+  if (!user?.active) return false;
+  return (roleRank[user.role] || 0) >= (roleRank[minimumRole] || 0);
+}
+
+function forbidden(res, message = "You do not have permission to perform this action.") {
+  return json(res, 403, { error: message });
+}
+
+function unauthorized(res) {
+  return json(res, 401, { error: "Please log in to continue." });
 }
 
 async function parseBody(req) {
@@ -123,6 +439,265 @@ async function parseBody(req) {
   if (!chunks.length) return {};
   const raw = Buffer.concat(chunks).toString("utf8");
   return JSON.parse(raw || "{}");
+}
+
+function highLevelEndpointKey(method, endpointPath) {
+  const pathname = new URL(endpointPath, highLevelBaseUrl).pathname;
+  return `${method.toUpperCase()} ${pathname}`;
+}
+
+function assertHighLevelReadOnly(method, endpointPath) {
+  const key = highLevelEndpointKey(method, endpointPath);
+  if (!highLevelReadAllowlist.has(key)) {
+    throw new Error(`Blocked HighLevel API operation: ${key}`);
+  }
+}
+
+function sanitizeApiDetail(text = "") {
+  const clean = String(text).replace(/\s+/g, " ").trim();
+  return clean.length > 240 ? `${clean.slice(0, 240)}...` : clean;
+}
+
+async function highLevelRequest(client, { method = "GET", endpointPath, query = {}, body }) {
+  assertHighLevelReadOnly(method, endpointPath);
+  const token = decryptToken(client.tokenCiphertext);
+  if (!token) {
+    const error = new Error("HighLevel token is missing for this client.");
+    error.status = 400;
+    throw error;
+  }
+
+  const url = new URL(endpointPath, highLevelBaseUrl);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "authorization": `Bearer ${token}`,
+      "accept": "application/json",
+      "content-type": "application/json",
+      "version": defaultHighLevelApiVersion
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  const raw = await response.text();
+  const payload = raw ? parseJsonMaybe(raw) : {};
+  if (!response.ok) {
+    const error = new Error("HighLevel API request failed.");
+    error.status = response.status;
+    error.detail = sanitizeApiDetail(typeof payload === "string" ? payload : payload.message || payload.error || raw);
+    throw error;
+  }
+  return payload;
+}
+
+function parseJsonMaybe(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function findFirstArrayByKeys(value, keys, depth = 0) {
+  if (!value || depth > 4) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "object") return [];
+  for (const key of keys) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  for (const nested of Object.values(value)) {
+    const found = findFirstArrayByKeys(nested, keys, depth + 1);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+function extractContacts(payload) {
+  return findFirstArrayByKeys(payload, ["contacts", "items", "results", "data"]);
+}
+
+function extractMessages(payload) {
+  return findFirstArrayByKeys(payload, ["messages", "items", "results", "data"]);
+}
+
+function extractWorkflows(payload) {
+  return findFirstArrayByKeys(payload, ["workflows", "items", "results", "data"]);
+}
+
+function timestampOf(record) {
+  const value = record.createdAt || record.dateAdded || record.dateCreated || record.updatedAt || record.timestamp || record.messageDate || record.date;
+  if (!value) return 0;
+  if (typeof value === "number") return value < 100000000000 ? value * 1000 : value;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function isWithinDateRange(record, dateStart, dateEnd) {
+  if (!dateStart || !dateEnd) return true;
+  const timestamp = timestampOf(record);
+  if (!timestamp) return true;
+  const start = Date.parse(`${dateStart}T00:00:00.000Z`);
+  const end = Date.parse(`${dateEnd}T23:59:59.999Z`);
+  return timestamp >= start && timestamp <= end;
+}
+
+function valueText(record, keys) {
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null) return String(record[key]);
+  }
+  return "";
+}
+
+function messageText(message) {
+  return valueText(message, ["body", "message", "text", "content", "subject", "snippet"]);
+}
+
+function messageContactId(message) {
+  return valueText(message, ["contactId", "contact_id", "contactID"]);
+}
+
+function messagePhone(message) {
+  return valueText(message, ["phone", "to", "from", "contactPhone", "phoneNumber"]);
+}
+
+function isOutboundMessage(message) {
+  const direction = valueText(message, ["direction", "messageDirection", "type"]).toLowerCase();
+  return direction.includes("out") || direction.includes("sent");
+}
+
+function contactName(contact) {
+  const fullName = [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim();
+  return contact.name || contact.fullName || fullName || contact.email || contact.phone || contact.id || "Unknown contact";
+}
+
+function contactTags(contact) {
+  const tags = contact.tags || contact.contactTags || contact.tag;
+  if (Array.isArray(tags)) {
+    return tags.map((tag) => typeof tag === "string" ? tag : tag.name || tag.value || "").filter(Boolean);
+  }
+  return String(tags || "").split(",").map((tag) => tag.trim()).filter(Boolean);
+}
+
+function contactHasTag(contact, tag) {
+  if (!tag) return true;
+  const needle = tag.toLowerCase();
+  return contactTags(contact).some((item) => item.toLowerCase() === needle || item.toLowerCase().includes(needle));
+}
+
+function hasAttribution(contact) {
+  const direct = ["source", "attributionSource", "utmSource", "utm_source", "firstAttribution", "lastAttribution"];
+  if (direct.some((key) => Boolean(contact[key]))) return true;
+  const customFields = contact.customFields || contact.customField || [];
+  return Array.isArray(customFields) && customFields.some((field) => {
+    const name = String(field.name || field.fieldKey || field.key || "").toLowerCase();
+    return Boolean(field.value) && (name.includes("source") || name.includes("utm") || name.includes("attribution"));
+  });
+}
+
+function classifyBlastReply(text) {
+  const clean = String(text || "").toLowerCase();
+  if (/(stop|unsubscribe|remove me|do not contact|don't contact)/.test(clean)) return "Opt-out";
+  if (/(yes|interested|send|info|details|call me|book|schedule)/.test(clean)) return "Positive";
+  if (/(no thanks|not interested|already have|too expensive|pass)/.test(clean)) return "Negative";
+  if (clean.trim()) return "Neutral";
+  return "Needs review";
+}
+
+function latestMessageForContact(messages, contactId) {
+  return messages
+    .filter((message) => messageContactId(message) === contactId)
+    .sort((a, b) => timestampOf(b) - timestampOf(a))[0];
+}
+
+function countMissedCalls(messages) {
+  return messages.filter((message) => {
+    const status = valueText(message, ["status", "callStatus", "disposition", "result"]).toLowerCase();
+    const text = messageText(message).toLowerCase();
+    return status.includes("miss") || status.includes("no-answer") || text.includes("missed call");
+  }).length;
+}
+
+async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = "", limit = 100 }) {
+  const filters = [];
+  if (replyTag) filters.push({ field: "tags", operator: "contains", value: replyTag });
+  if (dateStart && dateEnd) {
+    filters.push({
+      field: "dateAdded",
+      operator: "range",
+      value: {
+        gte: `${dateStart}T00:00:00.000Z`,
+        lte: `${dateEnd}T23:59:59.999Z`
+      }
+    });
+  }
+
+  const baseBody = {
+    locationId: client.locationId,
+    page: 1,
+    pageLimit: limit,
+    filters
+  };
+
+  try {
+    const payload = await highLevelRequest(client, {
+      method: "POST",
+      endpointPath: "/contacts/search",
+      body: baseBody
+    });
+    return extractContacts(payload).filter((contact) => isWithinDateRange(contact, dateStart, dateEnd) && contactHasTag(contact, replyTag));
+  } catch (error) {
+    const payload = await highLevelRequest(client, {
+      method: "POST",
+      endpointPath: "/contacts/search",
+      body: { locationId: client.locationId, page: 1, pageLimit: limit }
+    });
+    return extractContacts(payload).filter((contact) => isWithinDateRange(contact, dateStart, dateEnd) && contactHasTag(contact, replyTag));
+  }
+}
+
+async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "" }) {
+  const messages = [];
+  let cursor = "";
+  for (let page = 0; page < 3; page += 1) {
+    const payload = await highLevelRequest(client, {
+      method: "GET",
+      endpointPath: "/conversations/messages/export",
+      query: {
+        locationId: client.locationId,
+        startDate: dateStart ? `${dateStart}T00:00:00.000Z` : "",
+        endDate: dateEnd ? `${dateEnd}T23:59:59.999Z` : "",
+        channel,
+        cursor
+      }
+    });
+    messages.push(...extractMessages(payload));
+    cursor = payload.nextCursor || payload.cursor || payload.meta?.nextCursor || "";
+    if (!cursor) break;
+  }
+  return messages.filter((message) => isWithinDateRange(message, dateStart, dateEnd));
+}
+
+async function highLevelGetWorkflows(client) {
+  const payload = await highLevelRequest(client, {
+    method: "GET",
+    endpointPath: "/workflows/",
+    query: { locationId: client.locationId }
+  });
+  return extractWorkflows(payload);
+}
+
+async function testHighLevelConnection(client) {
+  const contacts = await highLevelSearchContacts(client, { limit: 1 });
+  return {
+    ok: true,
+    message: "HighLevel read-only connection succeeded.",
+    checked: "contacts/search",
+    sampleCount: contacts.length
+  };
 }
 
 function monthLabel(startDate) {
@@ -153,21 +728,18 @@ function classifyStatus(metrics) {
 }
 
 function statusSymbol(status) {
-  if (status === "Green") return "🟢";
-  if (status === "Yellow") return "🟡";
-  return "🔴";
+  return status;
 }
 
 function buildComment({ client, dateStart, metrics, blast }) {
   const label = monthLabel(dateStart);
-  const symbol = statusSymbol(metrics.status);
   const blastBlock = blast
     ? `Blasts (if applicable):\nBlast(s) Sent: Yes\nType: ${blast.messageType || "SMS"}\nSends: ${blast.estimatedSends || "Not available"}\nDelivery Rate: ${blast.deliveryRate || "Not available"}\nReplies / Engagement: ${blast.totalRepliedContacts} replies (${blast.positiveCount} positive, ${blast.neutralCount} neutral, ${blast.negativeCount} negative, ${blast.optOutCount} opt-out)`
     : "Blasts (if applicable):\nBlast(s) Sent: No\nType:\nSends:\nDelivery Rate:\nReplies / Engagement:";
 
   const issues = metrics.status === "Green" ? "None" : metrics.issues.join("\n");
 
-  return `Lead Hero (Software) - ${symbol} ${metrics.status} - ${label} ${client.name}
+  return `Lead Hero (Software) - ${metrics.status} - ${label} ${client.name}
 
 System Health:
 Routing Working: ${metrics.routingWorking}
@@ -234,6 +806,65 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
     optOutCount: optOut,
     needsReviewCount: needsReview,
     summary: `${total} contacts matched the reply tag during the selected window. ${positive} appear positive and ${needsReview} need human review.`,
+    source: "sample",
+    replies,
+    createdAt: new Date().toISOString()
+  };
+}
+
+async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase }) {
+  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag, limit: 100 });
+  const messages = await highLevelExportMessages(client, { dateStart, dateEnd });
+  const contactIds = new Set(contacts.map((contact) => String(contact.id || contact.contactId || "")));
+  const replies = contacts.slice(0, 50).map((contact) => {
+    const contactId = String(contact.id || contact.contactId || "");
+    const latest = latestMessageForContact(messages, contactId);
+    const text = latest ? messageText(latest) : "";
+    const classification = classifyBlastReply(text);
+    return {
+      id: crypto.randomUUID(),
+      contactId,
+      contactName: contactName(contact),
+      lastReplyDate: latest?.dateAdded || latest?.createdAt || dateEnd,
+      classification,
+      summary: text
+        ? summaryForClassification(classification, messagePhrase)
+        : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
+      evidence: text ? sanitizeApiDetail(text) : `Matched HighLevel contact tag "${replyTag}" within the selected date range.`,
+      reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified"
+    };
+  });
+
+  const phraseMatches = messages.filter((message) => {
+    if (!messagePhrase) return false;
+    const contactId = messageContactId(message);
+    return !contactIds.has(contactId) && messageText(message).toLowerCase().includes(messagePhrase.toLowerCase());
+  });
+  const counts = replies.reduce((acc, reply) => {
+    acc[reply.classification] = (acc[reply.classification] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    id: crypto.randomUUID(),
+    clientId: client.id,
+    clientName: client.name,
+    dateStart,
+    dateEnd,
+    replyTag,
+    workflowName,
+    messagePhrase,
+    messageType: "SMS",
+    estimatedSends: "Not available",
+    deliveryRate: "Not available",
+    totalRepliedContacts: contacts.length,
+    positiveCount: counts.Positive || 0,
+    neutralCount: counts.Neutral || 0,
+    negativeCount: counts.Negative || 0,
+    optOutCount: counts["Opt-out"] || 0,
+    needsReviewCount: counts["Needs review"] || 0,
+    summary: `${contacts.length} HighLevel contacts matched the reply tag during the selected window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag.`,
+    source: "live",
     replies,
     createdAt: new Date().toISOString()
   };
@@ -311,6 +942,7 @@ function generateMonthlyReport({ store, client, dateStart, dateEnd, blastAnalysi
     metrics,
     blastAnalysisId: blast?.id || "",
     generatedComment: buildComment({ client, dateStart, metrics, blast }),
+    source: "sample",
     postedToClickUp: false,
     clickupCommentId: "",
     evidence: [
@@ -338,34 +970,224 @@ function generateMonthlyReport({ store, client, dateStart, dateEnd, blastAnalysi
   return report;
 }
 
+async function generateLiveMonthlyReport({ store, client, dateStart, dateEnd, blastAnalysisId }) {
+  const routing = store.routingSetups.filter((item) => item.clientId === client.id && item.active);
+  const blast = store.blastAnalyses.find((item) => item.id === blastAnalysisId);
+  const issues = [];
+  const partials = [];
+  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, limit: 100 });
+  const allMessages = await highLevelExportMessages(client, { dateStart, dateEnd });
+  const callMessages = await highLevelExportMessages(client, { dateStart, dateEnd, channel: "Call" });
+
+  let workflows = [];
+  try {
+    workflows = await highLevelGetWorkflows(client);
+  } catch (error) {
+    partials.push(`Workflow metadata could not be loaded: ${error.detail || error.message}`);
+  }
+
+  const expectedPhrase = routing[0]?.expectedPhrase || "New form submission";
+  const routingMatches = routing.map((setup) => {
+    const staffId = String(setup.staffContactId || "");
+    const staffPhone = String(setup.staffPhone || "").replace(/\D/g, "");
+    const matches = allMessages.filter((message) => {
+      const contactMatch = staffId && messageContactId(message) === staffId;
+      const phone = messagePhone(message).replace(/\D/g, "");
+      const phoneMatch = staffPhone && phone.includes(staffPhone.slice(-10));
+      return (contactMatch || phoneMatch) &&
+        isOutboundMessage(message) &&
+        messageText(message).toLowerCase().includes(String(setup.expectedPhrase || expectedPhrase).toLowerCase());
+    });
+    return { setup, count: matches.length };
+  });
+  const routingMessages = routingMatches.reduce((sum, item) => sum + item.count, 0);
+  const workflowMessages = allMessages.filter((message) => String(message.source || "").toLowerCase() === "workflow").length;
+  const leadsReceived = contacts.length;
+  const callsMissed = countMissedCalls(callMessages);
+  const callsAnswered = Math.max(0, callMessages.length - callsMissed);
+  const attributionCount = contacts.filter(hasAttribution).length;
+  const attributionCoverage = leadsReceived ? Math.round((attributionCount / leadsReceived) * 100) : 0;
+  const missedRate = callsMissed / Math.max(1, callsAnswered + callsMissed);
+  const routingWorking = !routing.length
+    ? "No"
+    : routingMessages > 0
+      ? "Yes"
+      : workflowMessages > 0
+        ? "Partial"
+        : leadsReceived === 0
+          ? "Partial"
+          : "No";
+  const activeWorkflows = workflows.filter((workflow) => {
+    const status = String(workflow.status || "").toLowerCase();
+    return status.includes("publish") || status.includes("active");
+  }).length;
+  const automationsFiring = workflowMessages > 0 || activeWorkflows > 0 ? "Yes" : workflows.length ? "Partial" : "Partial";
+  const attributionIntact = leadsReceived === 0 ? "Partial" : attributionCoverage >= 80 ? "Yes" : attributionCoverage >= 60 ? "Partial" : "No";
+  const callsTracked = callMessages.length > 0 ? "Yes" : "No";
+
+  if (!routing.length) issues.push("Routing setup is missing staff notification contacts.");
+  if (routingWorking === "No") issues.push(`No outbound staff notification messages containing "${expectedPhrase}" were found.`);
+  if (routingWorking === "Partial") issues.push(`Workflow messages were found or there were no leads, but no exact staff notification match for "${expectedPhrase}" was confirmed.`);
+  if (attributionIntact !== "Yes") issues.push(leadsReceived ? `Attribution coverage is ${attributionCoverage}%, which needs review.` : "No leads were found in the selected period, so attribution could not be confirmed.");
+  if (callsTracked === "No") issues.push("No call records were found with channel=Call in the selected period.");
+  if (missedRate > 0.3) issues.push("Missed call rate is above the attention threshold.");
+  if (blast && blast.needsReviewCount > 0) issues.push(`${blast.needsReviewCount} blast replies need manual review.`);
+  issues.push(...partials);
+
+  const metrics = {
+    routingWorking,
+    automationsFiring,
+    attributionIntact,
+    callsTracked,
+    leadsReceived,
+    routingMessages,
+    callsAnswered,
+    callsMissed,
+    missedRate,
+    attributionCoverage,
+    issues,
+    nextMonthFocus: issues.length ? "Review the flagged items, confirm workflow evidence, and improve follow-up coverage." : "Maintain current routing, attribution, and response tracking.",
+    status: "Green"
+  };
+  metrics.status = classifyStatus(metrics);
+
+  return {
+    id: crypto.randomUUID(),
+    clientId: client.id,
+    clientName: client.name,
+    dateStart,
+    dateEnd,
+    status: metrics.status,
+    metrics,
+    blastAnalysisId: blast?.id || "",
+    generatedComment: buildComment({ client, dateStart, metrics, blast }),
+    source: "live",
+    postedToClickUp: false,
+    clickupCommentId: "",
+    evidence: [
+      {
+        label: "Routing evidence",
+        detail: routing.length
+          ? `${routingMessages} outbound staff notification message(s) contained "${expectedPhrase}" across ${routing.length} staff contact setup(s).`
+          : "No active routing setup exists for this client."
+      },
+      {
+        label: "Lead contacts",
+        detail: `${leadsReceived} contact record(s) matched the selected date range through read-only contact search.`
+      },
+      {
+        label: "Attribution coverage",
+        detail: `${attributionCoverage}% of matching contacts had source, UTM, attribution, or matching custom-field evidence.`
+      },
+      {
+        label: "Call activity",
+        detail: `${callsAnswered} answered and ${callsMissed} missed call message(s) found with channel=Call.`
+      },
+      {
+        label: "Workflow metadata",
+        detail: partials.length
+          ? partials.join(" ")
+          : `${workflows.length} workflow metadata record(s) were loaded read-only; node-level inspection is intentionally not claimed.`
+      }
+    ],
+    createdAt: new Date().toISOString()
+  };
+}
+
 async function handleApi(req, res, pathname) {
-  const store = await readStore();
+  if (req.method === "POST" && pathname === "/api/auth/login") {
+    if (!authRequired) {
+      return json(res, 200, { user: { email: "local-dev", role: "admin" } });
+    }
+    const body = await parseBody(req);
+    if (!body.email || !body.password) {
+      return json(res, 400, { error: "Email and password are required." });
+    }
+    try {
+      const payload = await supabaseAuth("token?grant_type=password", {
+        method: "POST",
+        body: { email: body.email, password: body.password }
+      });
+      const user = await loadAppUser(payload.user);
+      if (!user) return forbidden(res, "This user is not approved for the Lead Hero Health Check Tool.");
+      setCookie(res, "lh_session", payload.access_token, { maxAge: payload.expires_in || 3600 });
+      return json(res, 200, { user });
+    } catch (error) {
+      return json(res, error.status || 401, {
+        error: "Login failed. Please check your account access.",
+        detail: error.detail || ""
+      });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/auth/logout") {
+    clearCookie(res, "lh_session");
+    return json(res, 200, { ok: true });
+  }
+
+  if (req.method === "GET" && pathname === "/api/auth/me") {
+    const user = await getCurrentUser(req);
+    return json(res, 200, { authRequired, user });
+  }
+
+  const user = await getCurrentUser(req);
+
+  if (authRequired && pathname !== "/api/bootstrap" && !user) {
+    return unauthorized(res);
+  }
 
   if (req.method === "GET" && pathname === "/api/bootstrap") {
+    if (authRequired && !user) {
+      return json(res, 200, {
+        clients: [],
+        routingSetups: [],
+        blastAnalyses: [],
+        reports: [],
+        settings: {
+          highLevelApiVersion: defaultHighLevelApiVersion,
+          clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+          safeMode: true,
+          storage: supabaseConfigured ? "Supabase" : "Local",
+          authRequired
+        },
+        auth: { required: true, user: null }
+      });
+    }
+    const store = await readStore();
     return json(res, 200, {
       ...store,
       clients: store.clients.map(publicClient),
       settings: {
         ...store.settings,
-        clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN)
-      }
+        clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+        storage: supabaseConfigured ? "Supabase" : "Local",
+        authRequired
+      },
+      auth: { required: authRequired, user }
     });
   }
 
+  const store = await readStore();
+
   if (req.method === "POST" && pathname === "/api/clients") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can add or update clients.");
     const body = await parseBody(req);
+    const now = new Date().toISOString();
+    const existing = body.id ? store.clients.find((item) => item.id === body.id) : null;
     if (!body.name || !body.locationId) {
       return json(res, 400, { error: "Client name and HighLevel location ID are required." });
     }
-    const now = new Date().toISOString();
+    if (!existing && !body.pitToken) {
+      return json(res, 400, { error: "A read-only HighLevel Private Integration Token is required when adding a client." });
+    }
     const client = {
       id: body.id || crypto.randomUUID(),
       name: body.name.trim(),
       locationId: body.locationId.trim(),
       clickupTaskId: body.clickupTaskId?.trim() || "",
       timezone: body.timezone || "America/New_York",
-      tokenPreview: body.pitToken ? tokenPreview(body.pitToken) : body.tokenPreview || "",
-      tokenCiphertext: body.pitToken ? encryptToken(body.pitToken) : body.tokenCiphertext || "",
+      tokenPreview: body.pitToken ? tokenPreview(body.pitToken) : existing?.tokenPreview || "",
+      tokenCiphertext: body.pitToken ? encryptToken(body.pitToken) : existing?.tokenCiphertext || "",
       createdAt: body.createdAt || now,
       updatedAt: now
     };
@@ -376,7 +1198,25 @@ async function handleApi(req, res, pathname) {
     return json(res, 200, { client: publicClient(client), clients: store.clients.map(publicClient) });
   }
 
+  if (req.method === "POST" && pathname === "/api/highlevel/test") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can test client HighLevel connections.");
+    const body = await parseBody(req);
+    const client = store.clients.find((item) => item.id === body.clientId);
+    if (!client) return json(res, 404, { error: "Client not found." });
+    try {
+      const result = await testHighLevelConnection(client);
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, error.status || 502, {
+        ok: false,
+        error: "HighLevel connection failed. Please check the Private Integration Token and location ID.",
+        detail: error.detail || "The read-only connection test could not complete."
+      });
+    }
+  }
+
   if (req.method === "POST" && pathname === "/api/routing") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can update routing setup.");
     const body = await parseBody(req);
     if (!body.clientId || !body.staffPhone) {
       return json(res, 400, { error: "Client and staff phone are required." });
@@ -401,45 +1241,81 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "POST" && pathname === "/api/blasts/run") {
+    if (!canAccess(user, "operator")) return forbidden(res, "Only Admin and Operator users can run Blast Analyzer.");
     const body = await parseBody(req);
     const client = store.clients.find((item) => item.id === body.clientId);
     if (!client) return json(res, 404, { error: "Client not found." });
     if (!body.dateStart || !body.dateEnd || !body.replyTag) {
       return json(res, 400, { error: "Client, date range, and reply tag are required." });
     }
-    const analysis = generateBlastAnalysis({
-      client,
-      dateStart: body.dateStart,
-      dateEnd: body.dateEnd,
-      replyTag: body.replyTag,
-      workflowName: body.workflowName || "",
-      messagePhrase: body.messagePhrase || ""
-    });
+    let analysis;
+    try {
+      analysis = client.tokenCiphertext
+        ? await generateLiveBlastAnalysis({
+          client,
+          dateStart: body.dateStart,
+          dateEnd: body.dateEnd,
+          replyTag: body.replyTag,
+          workflowName: body.workflowName || "",
+          messagePhrase: body.messagePhrase || ""
+        })
+        : generateBlastAnalysis({
+          client,
+          dateStart: body.dateStart,
+          dateEnd: body.dateEnd,
+          replyTag: body.replyTag,
+          workflowName: body.workflowName || "",
+          messagePhrase: body.messagePhrase || ""
+        });
+    } catch (error) {
+      return json(res, error.status || 502, {
+        error: "HighLevel blast analysis failed.",
+        detail: error.detail || "The read-only HighLevel data pull could not complete."
+      });
+    }
     store.blastAnalyses.unshift(analysis);
     await writeStore(store);
     return json(res, 200, { analysis, blastAnalyses: store.blastAnalyses });
   }
 
   if (req.method === "POST" && pathname === "/api/monthly/run") {
+    if (!canAccess(user, "operator")) return forbidden(res, "Only Admin and Operator users can run monthly checks.");
     const body = await parseBody(req);
     const client = store.clients.find((item) => item.id === body.clientId);
     if (!client) return json(res, 404, { error: "Client not found." });
     if (!body.dateStart || !body.dateEnd) {
       return json(res, 400, { error: "Client and date range are required." });
     }
-    const report = generateMonthlyReport({
-      store,
-      client,
-      dateStart: body.dateStart,
-      dateEnd: body.dateEnd,
-      blastAnalysisId: body.blastAnalysisId || ""
-    });
+    let report;
+    try {
+      report = client.tokenCiphertext
+        ? await generateLiveMonthlyReport({
+          store,
+          client,
+          dateStart: body.dateStart,
+          dateEnd: body.dateEnd,
+          blastAnalysisId: body.blastAnalysisId || ""
+        })
+        : generateMonthlyReport({
+          store,
+          client,
+          dateStart: body.dateStart,
+          dateEnd: body.dateEnd,
+          blastAnalysisId: body.blastAnalysisId || ""
+        });
+    } catch (error) {
+      return json(res, error.status || 502, {
+        error: "HighLevel monthly check failed.",
+        detail: error.detail || "The read-only HighLevel data pull could not complete."
+      });
+    }
     store.reports.unshift(report);
     await writeStore(store);
     return json(res, 200, { report, reports: store.reports });
   }
 
   if (req.method === "POST" && pathname === "/api/clickup/post") {
+    if (!canAccess(user, "operator")) return forbidden(res, "Only Admin and Operator users can post reviewed ClickUp comments.");
     const body = await parseBody(req);
     const report = store.reports.find((item) => item.id === body.reportId);
     if (!report) return json(res, 404, { error: "Report not found." });

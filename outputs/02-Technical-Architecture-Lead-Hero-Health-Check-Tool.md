@@ -46,13 +46,14 @@ For MVP, a single Next.js app is enough. If the tool grows into scheduled jobs a
 
 Postgres.
 
-Recommended hosted option: Supabase or Neon.
+Recommended hosted option: Supabase Postgres for the production MVP.
 
 Reason:
 
 - Structured client/report data
 - Good relational model
 - Easy querying for reports, blast analyses, and audit history
+- Supabase Auth can share identity context with Supabase Row-Level Security
 
 ### ORM
 
@@ -66,9 +67,17 @@ Reason:
 
 ### Authentication
 
-Clerk, Supabase Auth, or Auth.js.
+Supabase Auth is the recommended production MVP choice if Supabase Postgres is used.
 
-For MVP, email/password or Google login is enough. Access should be restricted to internal team members only.
+Use Google login restricted to approved company domains or invite-only email/password. Public signup should stay disabled. Admin users should use MFA before real client data or HighLevel PIT tokens are stored.
+
+Reason:
+
+- Auth and Postgres live in the same platform.
+- Supabase Auth integrates cleanly with Postgres Row-Level Security.
+- User identity can be tied to client assignments, user roles, report access, and audit logs.
+
+Auth alternatives such as Clerk or Auth.js are still viable, but they add more integration work if the database uses Supabase RLS.
 
 ### AI Reply Classification
 
@@ -100,6 +109,8 @@ Content-Type: application/json
 ```
 
 Some endpoints may use newer versions, but the app should centralize the HighLevel API version in config.
+
+Client-specific HighLevel Private Integration Tokens should be entered through an Admin-only Clients screen and stored encrypted in Postgres. They should not be stored in code, frontend files, Git, or Railway variables. Railway variables are for app-wide secrets, not per-client PITs.
 
 ### HighLevel Access Boundary
 
@@ -180,11 +191,18 @@ Fields:
 - name
 - ghl_location_id
 - ghl_private_integration_token_encrypted
+- ghl_private_integration_token_preview
 - clickup_task_id
 - timezone
 - status
 - created_at
 - updated_at
+
+Notes:
+
+- `ghl_private_integration_token_encrypted` is server-only and must never be sent to the browser.
+- The browser may receive `hasToken` and a short non-sensitive preview only.
+- Token replacement should be logged in `api_audit_logs` without logging the token value.
 
 ### routing_setups
 
@@ -424,11 +442,32 @@ APP_ENCRYPTION_KEY=
 CLICKUP_API_TOKEN=
 OPENAI_API_KEY=
 HIGHLEVEL_API_VERSION=2021-07-28
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+AUTH_REQUIRED=true
+ADMIN_EMAILS=
 NEXT_PUBLIC_APP_URL=
 AUTH_SECRET=
 ```
 
-Client-specific HighLevel PITs should be encrypted in the database, not stored as plain text environment variables.
+`APP_ENCRYPTION_KEY` is the app-owned master encryption secret used by the server to encrypt and decrypt stored client-level secrets, especially HighLevel Private Integration Tokens. It must be generated as a long random value, stored only in Railway variables or another approved secret manager, and kept stable across deploys so existing encrypted tokens remain decryptable.
+
+Client-specific HighLevel PITs should be encrypted in the database, not stored as plain text environment variables and not stored as one Railway variable per client.
+
+Railway variable guidance:
+
+- Store app-wide secrets in Railway: `APP_ENCRYPTION_KEY`, `DATABASE_URL`, `CLICKUP_API_TOKEN`, `OPENAI_API_KEY`, `AUTH_SECRET`, and Supabase server-side credentials.
+- Do not store client HighLevel PITs in Railway variables.
+- Do not expose server-only secrets through any `NEXT_PUBLIC_` variable.
+- Use separate Railway environments and separate secrets for development, staging, and production.
+
+Current MVP implementation note:
+
+- The plain Node server validates users through Supabase Auth and stores the login token in an HTTP-only cookie.
+- The server uses `SUPABASE_SERVICE_ROLE_KEY` only on the backend to read/write the app tables.
+- Frontend code never receives the Supabase service role key or encrypted HighLevel PIT values.
+- Run `supabase/schema.sql` in Supabase before enabling production storage.
 
 ## API Reliability Notes
 
