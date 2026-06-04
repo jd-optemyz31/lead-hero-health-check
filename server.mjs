@@ -18,8 +18,8 @@ const aiProvider = normalizeAiProvider(process.env.AI_PROVIDER || detectedAiProv
 const aiProviderLabel = aiProvider === "openrouter" ? "OpenRouter" : "OpenAI";
 const aiBaseUrl = normalizeAiBaseUrl(configuredAiBaseUrl || (aiProvider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1"));
 const openAiApiKey = aiProvider === "openrouter"
-  ? process.env.OPENROUTER_API_KEY || ""
-  : process.env.OPENAI_API_KEY || "";
+  ? (process.env.OPENROUTER_API_KEY || "").trim()
+  : (process.env.OPENAI_API_KEY || "").trim();
 const configuredOpenAiModel = process.env.OPENAI_MODEL || (aiProvider === "openrouter" ? "openai/gpt-5.4-nano" : "gpt-5.4-nano");
 const openAiModel = normalizeOpenAiModel(configuredOpenAiModel, aiProvider);
 const openAiModelWarning = configuredOpenAiModel !== openAiModel
@@ -1032,7 +1032,10 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       }
       const rawText = await response.text();
       const data = parseJsonMaybe(rawText);
-      return extractChatCompletionJson(data);
+      const extracted = extractChatCompletionJson(data);
+      const msg = data?.choices?.[0]?.message;
+      console.error("[AI-DIAG] content-type:", typeof msg?.content, "| content:", String(msg?.content ?? "").slice(0, 300), "| extracted:", JSON.stringify(extracted));
+      return extracted;
     };
 
     try {
