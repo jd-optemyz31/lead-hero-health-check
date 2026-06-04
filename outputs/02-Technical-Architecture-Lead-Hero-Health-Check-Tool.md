@@ -92,8 +92,8 @@ Current MVP implementation:
 - The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus`.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - Only the minimal reply text needed for classification and optional blast context should be sent to the AI service; HighLevel PITs, ClickUp tokens, Supabase keys, and full account exports must never be sent.
-- If OpenAI is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier and marks the method as `Rules` or `Rules fallback`.
-- The default OpenAI model is `gpt-5.4-nano`, chosen for high-volume classification and extraction-style work. Use the OpenAI API model ID directly; do not include provider prefixes such as `openai/`.
+- If OpenAI is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier, marks the method as `Rules` or `Rules fallback`, and shows a safe fallback reason without exposing keys or raw secrets.
+- The default OpenAI model is `gpt-5.4-nano`, chosen for high-volume classification and extraction-style work. Use the OpenAI API model ID directly; provider prefixes such as `openai/` are normalized away for API calls and surfaced as a setup warning.
 
 ### Hosting
 

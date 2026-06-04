@@ -276,6 +276,7 @@ function localBlastAnalysis(client, body) {
       evidence: "Local preview classification based on sample conversation evidence.",
       confidence: classification === "Needs review" ? 0.38 : 0.74,
       analysisMethod: "Sample",
+      analysisNote: "",
       reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified"
     })),
     createdAt: new Date().toISOString()
@@ -708,7 +709,7 @@ function renderBlast() {
       <td>${escapeHtml(reply.summary)}</td>
       <td>${escapeHtml(reply.evidence)}</td>
       <td>${escapeHtml(reply.analysisMethod || "Rules")}</td>
-      <td>${escapeHtml(reply.reviewStatus)}</td>
+      <td>${escapeHtml(reply.reviewStatus)}${reply.analysisNote ? `<br><span class="muted">${escapeHtml(reply.analysisNote)}</span>` : ""}</td>
     </tr>
   `).join("");
 
@@ -932,7 +933,7 @@ function renderSettings() {
         <div class="grid">
           ${metricCard("HighLevel API version", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
           ${metricCard("ClickUp connection", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "CLICKUP_API_TOKEN detected" : "Set CLICKUP_API_TOKEN for live posting")}
-          ${metricCard("AI classification", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.openAiModel || "OpenAI model"} configured server-side` : "Set OPENAI_API_KEY to classify blast replies with AI")}
+          ${metricCard("AI classification", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.openAiModel || "OpenAI model"} configured server-side${state.settings.openAiModelWarning ? ` (${state.settings.openAiModelWarning})` : ""}` : "Set OPENAI_API_KEY to classify blast replies with AI")}
           ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Supabase-backed production storage" : "Local JSON development storage")}
           ${metricCard("Authentication", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth enforced" : "Auth disabled for local development")}
           ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}

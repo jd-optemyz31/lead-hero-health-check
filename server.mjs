@@ -13,7 +13,11 @@ const port = Number(process.env.PORT || 5173);
 const highLevelBaseUrl = process.env.HIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com";
 const defaultHighLevelApiVersion = process.env.HIGHLEVEL_API_VERSION || "2021-07-28";
 const openAiApiKey = process.env.OPENAI_API_KEY || "";
-const openAiModel = process.env.OPENAI_MODEL || "gpt-5.4-nano";
+const configuredOpenAiModel = process.env.OPENAI_MODEL || "gpt-5.4-nano";
+const openAiModel = normalizeOpenAiModel(configuredOpenAiModel);
+const openAiModelWarning = configuredOpenAiModel !== openAiModel
+  ? `Using ${openAiModel}; remove the ${configuredOpenAiModel.split("/")[0]}/ prefix from OPENAI_MODEL.`
+  : "";
 const supabaseUrl = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -42,14 +46,15 @@ const defaultStore = {
   routingSetups: [],
   blastAnalyses: [],
   reports: [],
-  settings: {
-    highLevelApiVersion: defaultHighLevelApiVersion,
-    clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
-    aiConnected: Boolean(openAiApiKey),
-    openAiModel,
-    safeMode: true
-  }
-};
+    settings: {
+      highLevelApiVersion: defaultHighLevelApiVersion,
+      clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+      aiConnected: Boolean(openAiApiKey),
+      openAiModel,
+      openAiModelWarning,
+      safeMode: true
+    }
+  };
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -68,6 +73,11 @@ const roleRank = {
   operator: 2,
   admin: 3
 };
+
+function normalizeOpenAiModel(model) {
+  const clean = String(model || "gpt-5.4-nano").trim();
+  return clean.startsWith("openai/") ? clean.slice("openai/".length) : clean;
+}
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -270,6 +280,7 @@ async function readSupabaseStore() {
       clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
       aiConnected: Boolean(openAiApiKey),
       openAiModel,
+      openAiModelWarning,
       safeMode: true,
       storage: "Supabase",
       authRequired
@@ -709,6 +720,37 @@ function parseJsonObject(text) {
   }
 }
 
+function openAiFallbackReason(error) {
+  if (error?.fallbackReason) return error.fallbackReason;
+  if (error?.name === "TimeoutError" || String(error?.message || "").toLowerCase().includes("timeout")) {
+    return "OpenAI request timed out.";
+  }
+  if (String(error?.message || "").includes("fetch failed")) {
+    return "OpenAI request could not reach the API.";
+  }
+  return "OpenAI classification did not complete.";
+}
+
+async function openAiErrorReason(response) {
+  let detail = "";
+  try {
+    const text = await response.text();
+    const parsed = parseJsonObject(text);
+    detail = parsed?.error?.message || text;
+  } catch {
+    detail = "";
+  }
+  const safeDetail = sanitizeApiDetail(detail);
+  const suffix = safeDetail ? ` ${safeDetail}` : "";
+  if (response.status === 400) return `OpenAI rejected the classification request.${suffix}`;
+  if (response.status === 401) return "OpenAI API key was rejected. Check OPENAI_API_KEY in Railway.";
+  if (response.status === 403) return `OpenAI model or account access is not allowed.${suffix}`;
+  if (response.status === 404) return `OpenAI model was not found. Check OPENAI_MODEL in Railway.${suffix}`;
+  if (response.status === 429) return "OpenAI rate limit or quota was hit.";
+  if (response.status >= 500) return "OpenAI API returned a server error.";
+  return `OpenAI request failed with status ${response.status}.${suffix}`;
+}
+
 function ruleBasedBlastAnalysis(text, phrase) {
   const classification = classifyBlastReply(text);
   const confidenceMap = {
@@ -726,7 +768,8 @@ function ruleBasedBlastAnalysis(text, phrase) {
     evidence: text ? sanitizeApiDetail(text) : "",
     confidence: confidenceMap[classification] || 0.5,
     reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified",
-    analysisMethod: openAiApiKey ? "Rules fallback" : "Rules"
+    analysisMethod: openAiApiKey ? "Rules fallback" : "Rules",
+    analysisNote: openAiApiKey ? "" : "OpenAI API key is not configured."
   };
 }
 
@@ -801,7 +844,9 @@ async function classifyBlastReplyWithAi({ text, phrase }) {
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI classification failed with ${response.status}`);
+      const error = new Error(`OpenAI classification failed with ${response.status}`);
+      error.fallbackReason = await openAiErrorReason(response);
+      throw error;
     }
 
     const data = await response.json();
@@ -818,12 +863,14 @@ async function classifyBlastReplyWithAi({ text, phrase }) {
       evidence: sanitizeApiDetail(parsed?.evidence || fallback.evidence || text),
       confidence,
       reviewStatus,
-      analysisMethod: "AI"
+      analysisMethod: "AI",
+      analysisNote: ""
     };
-  } catch {
+  } catch (error) {
     return {
       ...fallback,
-      reviewStatus: fallback.classification === "Needs review" ? "Review needed" : "Auto-classified (rules fallback)"
+      reviewStatus: fallback.classification === "Needs review" ? "Review needed" : "Auto-classified (rules fallback)",
+      analysisNote: openAiFallbackReason(error)
     };
   }
 }
@@ -1207,6 +1254,7 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
     evidence: evidenceForClassification(classification),
     confidence: classification === "Needs review" ? 0.38 : 0.74,
     analysisMethod: "Sample",
+    analysisNote: "",
     reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified"
   }));
 
@@ -1263,6 +1311,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
       evidence: analysis.evidence || `Matched HighLevel contact tag "${replyTag}" within the selected date range.`,
       confidence: analysis.confidence,
       analysisMethod: analysis.analysisMethod,
+      analysisNote: analysis.analysisNote,
       reviewStatus: analysis.reviewStatus
     };
   });
@@ -1285,6 +1334,8 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
   const methodSummary = aiClassifiedCount
     ? `${aiClassifiedCount} reply/replies were classified by AI${fallbackClassifiedCount ? ` and ${fallbackClassifiedCount} used rules fallback` : ""}.`
     : `${fallbackClassifiedCount} reply/replies used rules fallback${openAiApiKey ? " because AI classification did not complete" : " because OpenAI is not configured"}.`;
+  const fallbackReasons = [...new Set(replies.map((reply) => reply.analysisNote).filter(Boolean))];
+  const fallbackReasonSummary = fallbackReasons.length ? ` Reason: ${fallbackReasons.slice(0, 2).join(" ")}` : "";
 
   return {
     id: crypto.randomUUID(),
@@ -1304,7 +1355,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     negativeCount: counts.Negative || 0,
     optOutCount: counts["Opt-out"] || 0,
     needsReviewCount: counts["Needs review"] || 0,
-    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${methodSummary}`,
+    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${methodSummary}${fallbackReasonSummary}`,
     source: "live",
     analysisMethod,
     replies,
@@ -1624,6 +1675,7 @@ async function handleApi(req, res, pathname) {
           clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
           aiConnected: Boolean(openAiApiKey),
           openAiModel,
+          openAiModelWarning,
           safeMode: true,
           storage: supabaseConfigured ? "Supabase" : "Local",
           authRequired
@@ -1640,6 +1692,7 @@ async function handleApi(req, res, pathname) {
         clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
         aiConnected: Boolean(openAiApiKey),
         openAiModel,
+        openAiModelWarning,
         storage: supabaseConfigured ? "Supabase" : "Local",
         authRequired
       },
