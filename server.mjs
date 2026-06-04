@@ -757,6 +757,10 @@ function normalizeReviewStatus(classification) {
   return "Auto-classified";
 }
 
+function hasValidAiClassification(parsed) {
+  return Boolean(parsed && normalizeBlastClassification(parsed.classification));
+}
+
 function clampConfidence(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0.5;
@@ -933,6 +937,12 @@ function isOpenRouterParameterRoutingIssue(reason = "") {
   return clean.includes("no endpoints found") || clean.includes("requested parameters") || clean.includes("provider routing");
 }
 
+function invalidAiClassificationError() {
+  const error = new Error(`${aiProviderLabel} returned an invalid classification response.`);
+  error.fallbackReason = `${aiProviderLabel} returned an invalid classification response.`;
+  return error;
+}
+
 async function requestAiClassification({ text, phrase, thread = [] }) {
   const schema = blastReplyJsonSchema();
   if (aiProvider === "openrouter") {
@@ -972,39 +982,36 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
         { role: "system", content: blastReplyRelaxedSystemPrompt() },
         { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
       ],
+      response_format: { type: "json_object" },
       temperature: 0,
       max_tokens: 250
     };
-
-    const response = await fetch(`${aiBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(strictBody),
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!response.ok) {
-      const fallbackReason = await openAiErrorReason(response);
-      if (isOpenRouterParameterRoutingIssue(fallbackReason)) {
-        const relaxedResponse = await fetch(`${aiBaseUrl}/chat/completions`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(relaxedBody),
-          signal: AbortSignal.timeout(15000)
-        });
-        if (relaxedResponse.ok) {
-          const relaxedData = await relaxedResponse.json();
-          return extractChatCompletionJson(relaxedData);
-        }
-        const relaxedError = new Error(`${aiProviderLabel} classification failed with ${relaxedResponse.status}`);
-        relaxedError.fallbackReason = await openAiErrorReason(relaxedResponse);
-        throw relaxedError;
+    const requestOpenRouter = async (body) => {
+      const response = await fetch(`${aiBaseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) {
+        const error = new Error(`${aiProviderLabel} classification failed with ${response.status}`);
+        error.fallbackReason = await openAiErrorReason(response);
+        throw error;
       }
-      const error = new Error(`${aiProviderLabel} classification failed with ${response.status}`);
-      error.fallbackReason = fallbackReason;
-      throw error;
+      const data = await response.json();
+      return extractChatCompletionJson(data);
+    };
+
+    try {
+      const strictParsed = await requestOpenRouter(strictBody);
+      if (hasValidAiClassification(strictParsed)) return strictParsed;
+    } catch (error) {
+      if (!isOpenRouterParameterRoutingIssue(openAiFallbackReason(error))) throw error;
     }
-    const data = await response.json();
-    return extractChatCompletionJson(data);
+
+    const relaxedParsed = await requestOpenRouter(relaxedBody);
+    if (hasValidAiClassification(relaxedParsed)) return relaxedParsed;
+    throw invalidAiClassificationError();
   }
 
   const response = await fetch(`${aiBaseUrl}/responses`, {

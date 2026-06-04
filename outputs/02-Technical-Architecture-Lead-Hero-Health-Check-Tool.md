@@ -92,7 +92,7 @@ Current MVP implementation:
 - OpenRouter uses the OpenAI-compatible Chat Completions API at `https://openrouter.ai/api/v1/chat/completions`.
 - `AI_PROVIDER`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
 - The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus` where the provider can route those parameters.
-- In OpenRouter mode, if no endpoint can handle the strict structured-output parameters, the server retries once with a JSON-only chat request before falling back to local rules.
+- In OpenRouter mode, if no endpoint can handle the strict structured-output parameters, or if the strict response does not contain a valid classification, the server retries once with a simpler JSON-only chat request before falling back to local rules.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - The server normalizes common AI label variants, such as lowercase labels, `opt_out`, and `needs_review`, into the approved labels before saving or displaying results.
 - If the AI provider returns a partial response with no valid classification label, the server must reject that AI result and mark the row as rules fallback instead of displaying a mixed AI/fallback row.
