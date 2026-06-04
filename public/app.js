@@ -12,11 +12,9 @@
 
 const navItems = [
   { id: "clients", label: "Clients", icon: icons.clients },
-  { id: "routing", label: "Routing Setup", icon: icons.routing },
   { id: "blast", label: "Blast Analyzer", icon: icons.blast },
   { id: "monthly", label: "Monthly Check", icon: icons.monthly },
-  { id: "reports", label: "Reports", icon: icons.reports },
-  { id: "settings", label: "Settings", icon: icons.settings }
+  { id: "reports", label: "Reports", icon: icons.reports }
 ];
 
 const state = {
@@ -518,12 +516,11 @@ function render() {
   }
   const views = {
     clients: renderClients,
-    routing: renderRouting,
     blast: renderBlast,
     monthly: renderMonthly,
-    reports: renderReports,
-    settings: renderSettings
+    reports: renderReports
   };
+  if (!views[state.active]) state.active = "clients";
   views[state.active]();
 }
 
@@ -560,10 +557,26 @@ function renderLogin() {
 function renderClients() {
   const canManageConnections = isAdminUser();
   const editingClient = state.clients.find((client) => client.id === state.editingClientId);
+  const routingClientId = editingClient?.id || currentClientId();
+  const routingRows = state.routingSetups
+    .filter((setup) => !routingClientId || setup.clientId === routingClientId)
+    .map((setup) => {
+      const client = state.clients.find((item) => item.id === setup.clientId);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(client?.name || "Unknown client")}</strong></td>
+          <td>${escapeHtml(setup.staffContactId || "Not provided")}</td>
+          <td>${escapeHtml(setup.staffPhone)}</td>
+          <td>${escapeHtml(setup.expectedPhrase)}</td>
+          <td>${setup.expectedDelayMinutes} min</td>
+          <td>${setup.active ? badge("Active") : badge("Inactive")}</td>
+        </tr>
+      `;
+    }).join("");
   const formTitle = editingClient ? `Edit ${editingClient.name}` : "Add client";
   const formSubtitle = editingClient
-    ? "Update connection details and account flow settings. Leave the token blank to keep the saved token."
-    : "Store the read-only HighLevel connection and ClickUp task target.";
+    ? "Update connection, lead flow, routing, and ClickUp settings. Leave the token blank to keep the saved token."
+    : "Store the read-only HighLevel connection, lead flow, routing, and ClickUp task target.";
   const rows = state.clients.map((client) => `
     <tr>
       <td><strong>${escapeHtml(client.name)}</strong><br><span class="muted">${escapeHtml(client.timezone)}</span></td>
@@ -583,19 +596,23 @@ function renderClients() {
   `).join("");
 
   renderShell(`
-    <div class="grid two">
+    <div class="grid">
       <section class="panel">
         <div class="panel-header">
           <div><h2>${escapeHtml(formTitle)}</h2><p>${escapeHtml(formSubtitle)}</p></div>
         </div>
         <form id="client-form" class="grid">
           <input type="hidden" name="id" value="${escapeHtml(editingClient?.id || "")}">
+          <h3 class="section-kicker">Connection</h3>
           <div class="form-grid">
             <div class="field"><label>Client name</label><input name="name" required placeholder="Client account name" value="${escapeHtml(editingClient?.name || "")}"></div>
             <div class="field"><label>Timezone</label><select name="timezone">${timezoneOptions(editingClient?.timezone || "America/New_York")}</select></div>
             <div class="field"><label>HighLevel location ID</label><input name="locationId" required placeholder="Location/sub-account ID" value="${escapeHtml(editingClient?.locationId || "")}"></div>
             <div class="field"><label>ClickUp task ID</label><input name="clickupTaskId" placeholder="ClickUp client task ID" value="${escapeHtml(editingClient?.clickupTaskId || "")}"></div>
             <div class="field"><label>Read-only Private Integration Token</label><input name="pitToken" type="password" ${editingClient ? "" : "required"} placeholder="${editingClient ? "Leave blank to keep saved token" : "Encrypted server-side after saving"}"></div>
+          </div>
+          <h3 class="section-kicker">Lead flow</h3>
+          <div class="form-grid">
             <div class="field"><label>Form lead tag</label><input name="formLeadTag" value="${escapeHtml(editingClient?.formLeadTag || "form lead")}"></div>
             <div class="field"><label>Active pipeline name</label><input name="activePipelineName" placeholder="#1 Active Pipeline" value="${escapeHtml(editingClient?.activePipelineName || "")}"></div>
             <div class="field"><label>Active pipeline ID</label><input name="activePipelineId" placeholder="Optional exact pipeline ID" value="${escapeHtml(editingClient?.activePipelineId || "")}"></div>
@@ -610,6 +627,28 @@ function renderClients() {
       </section>
       <section class="panel">
         <div class="panel-header">
+          <div><h2>Routing</h2><p>Configure staff notification evidence for the selected client. This only checks messages containing the expected phrase.</p></div>
+        </div>
+        <form id="routing-form" class="grid">
+          <div class="form-grid">
+            <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions(routingClientId)}</select></div>
+            <div class="field"><label>Staff contact ID</label><input name="staffContactId" placeholder="Optional if phone is enough"></div>
+            <div class="field"><label>Staff phone number</label><input name="staffPhone" required placeholder="+1 555 010 1400"></div>
+            <div class="field"><label>Expected phrase</label><input name="expectedPhrase" value="New form submission"></div>
+            <div class="field"><label>Expected delay window</label><select name="expectedDelayMinutes"><option value="5">5 minutes</option><option value="10" selected>10 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></div>
+          </div>
+          <p class="muted">Routing checks are read-only. The app verifies staff notification evidence; it does not send or resend notifications.</p>
+          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.save} Save routing setup</button></div>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Client</th><th>Staff contact</th><th>Phone</th><th>Phrase</th><th>Delay</th><th>Status</th></tr></thead>
+            <tbody>${routingRows || `<tr><td colspan="6"><div class="empty">No routing setup has been added for this client yet.</div></td></tr>`}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
           <div><h2>Clients</h2><p>${state.clients.length} configured account${state.clients.length === 1 ? "" : "s"}</p></div>
         </div>
         <div class="table-wrap">
@@ -619,8 +658,21 @@ function renderClients() {
           </table>
         </div>
       </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div><h2>System status</h2><p>Read-only integration state from server-side configuration.</p></div>
+        </div>
+        <div class="grid six">
+          ${metricCard("HighLevel API", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
+          ${metricCard("ClickUp", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "Comment posting enabled" : "Set CLICKUP_API_TOKEN for live posting")}
+          ${metricCard("AI", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} / ${state.settings.openAiModel || "model"}` : "Set AI key for blast classification")}
+          ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Production storage" : "Local development storage")}
+          ${metricCard("Auth", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth" : "Auth disabled locally")}
+          ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}
+        </div>
+      </section>
     </div>
-  `, "Clients", "Manage account connections and report destinations.");
+  `, "Clients", "Manage each account's connection, lead flow, routing, and ClickUp destination.");
 
   document.querySelector("#client-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -669,54 +721,6 @@ function renderClients() {
       }
     });
   });
-}
-
-function renderRouting() {
-  const rows = state.routingSetups.map((setup) => {
-    const client = state.clients.find((item) => item.id === setup.clientId);
-    return `
-      <tr>
-        <td><strong>${escapeHtml(client?.name || "Unknown client")}</strong></td>
-        <td>${escapeHtml(setup.staffContactId || "Not provided")}</td>
-        <td>${escapeHtml(setup.staffPhone)}</td>
-        <td>${escapeHtml(setup.expectedPhrase)}</td>
-        <td>${setup.expectedDelayMinutes} min</td>
-        <td>${setup.active ? badge("Active") : badge("Inactive")}</td>
-      </tr>
-    `;
-  }).join("");
-
-  renderShell(`
-    <div class="grid two">
-      <section class="panel">
-        <div class="panel-header">
-          <div><h2>Routing evidence setup</h2><p>Checks staff-contact conversations for workflow messages containing the expected phrase.</p></div>
-        </div>
-        <form id="routing-form" class="grid">
-          <div class="form-grid">
-            <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions()}</select></div>
-            <div class="field"><label>Staff contact ID</label><input name="staffContactId" placeholder="Optional if phone is enough"></div>
-            <div class="field"><label>Staff phone number</label><input name="staffPhone" required placeholder="+1 555 010 1400"></div>
-            <div class="field"><label>Expected phrase</label><input name="expectedPhrase" value="New form submission"></div>
-            <div class="field"><label>Expected delay window</label><select name="expectedDelayMinutes"><option value="5">5 minutes</option><option value="10" selected>10 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></div>
-          </div>
-          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.save} Save routing setup</button></div>
-        </form>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
-          <div><h2>Configured staff notifications</h2><p>Routing is checked without needing workflow write access.</p></div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Client</th><th>Staff contact</th><th>Phone</th><th>Phrase</th><th>Delay</th><th>Status</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="6"><div class="empty">No routing setup has been added yet.</div></td></tr>`}</tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-  `, "Routing Setup", "Verify new-lead internal notifications using the New form submission phrase.");
-
   document.querySelector("#routing-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
@@ -973,36 +977,6 @@ function renderReports() {
       </div>
     </section>
   `, "Reports", "Review generated maintenance checks and posting status.");
-}
-
-function renderSettings() {
-  renderShell(`
-    <div class="grid two">
-      <section class="panel">
-        <div class="panel-header">
-          <div><h2>Safety boundary</h2><p>The app is intentionally missing all HighLevel write actions.</p></div>
-        </div>
-        <div class="evidence-list">
-          <div class="evidence-item"><strong>HighLevel mode</strong><span>Read contacts, conversations, calls, workflows, opportunities, tags, and custom fields only.</span></div>
-          <div class="evidence-item"><strong>Blocked actions</strong><span>No contact messaging, calls, workflow enrollments, tag updates, opportunity edits, or contact updates.</span></div>
-          <div class="evidence-item"><strong>ClickUp mode</strong><span>Only reviewed report comments can be posted to configured ClickUp tasks.</span></div>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
-          <div><h2>Integration status</h2><p>Server-side environment controls live API posting.</p></div>
-        </div>
-        <div class="grid">
-          ${metricCard("HighLevel API version", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
-          ${metricCard("ClickUp connection", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "CLICKUP_API_TOKEN detected" : "Set CLICKUP_API_TOKEN for live posting")}
-          ${metricCard("AI classification", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} / ${state.settings.openAiModel || "model"} configured server-side${state.settings.openAiModelWarning ? ` (${state.settings.openAiModelWarning})` : ""}` : "Set OPENAI_API_KEY or OPENROUTER_API_KEY to classify blast replies with AI")}
-          ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Supabase-backed production storage" : "Local JSON development storage")}
-          ${metricCard("Authentication", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth enforced" : "Auth disabled for local development")}
-          ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}
-        </div>
-      </section>
-    </div>
-  `, "Settings", "Review API settings and safety controls.");
 }
 
 load().catch((error) => {
