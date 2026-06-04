@@ -91,7 +91,8 @@ Current MVP implementation:
 - OpenAI direct uses the Responses API.
 - OpenRouter uses the OpenAI-compatible Chat Completions API at `https://openrouter.ai/api/v1/chat/completions`.
 - `AI_PROVIDER`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
-- The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus`.
+- The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus` where the provider can route those parameters.
+- In OpenRouter mode, if no endpoint can handle the strict structured-output parameters, the server retries once with a JSON-only chat request before falling back to local rules.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - Only the minimal reply text needed for classification and optional blast context should be sent to the AI service; HighLevel PITs, ClickUp tokens, Supabase keys, and full account exports must never be sent.
 - If the AI provider is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier, marks the method as `Rules` or `Rules fallback`, and shows a safe fallback reason without exposing keys or raw secrets.

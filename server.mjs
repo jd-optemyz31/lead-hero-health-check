@@ -18,7 +18,7 @@ const aiProvider = normalizeAiProvider(process.env.AI_PROVIDER || detectedAiProv
 const aiProviderLabel = aiProvider === "openrouter" ? "OpenRouter" : "OpenAI";
 const aiBaseUrl = normalizeAiBaseUrl(configuredAiBaseUrl || (aiProvider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1"));
 const openAiApiKey = aiProvider === "openrouter"
-  ? process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || ""
+  ? process.env.OPENROUTER_API_KEY || ""
   : process.env.OPENAI_API_KEY || "";
 const configuredOpenAiModel = process.env.OPENAI_MODEL || (aiProvider === "openrouter" ? "openai/gpt-5.4-nano" : "gpt-5.4-nano");
 const openAiModel = normalizeOpenAiModel(configuredOpenAiModel, aiProvider);
@@ -779,7 +779,7 @@ async function openAiErrorReason(response) {
   const safeDetail = sanitizeApiDetail(detail);
   const suffix = safeDetail ? ` ${safeDetail}` : "";
   if (response.status === 400) return `${aiProviderLabel} rejected the classification request.${suffix}`;
-  if (response.status === 401) return `${aiProviderLabel} API key was rejected. Check ${aiProvider === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY"} in Railway.`;
+  if (response.status === 401) return `${aiProviderLabel} API key was rejected. Check ${aiProvider === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY"} in the server environment.`;
   if (response.status === 403) return `${aiProviderLabel} model or account access is not allowed.${suffix}`;
   if (response.status === 404) return `${aiProviderLabel} model was not found. Check OPENAI_MODEL in Railway.${suffix}`;
   if (response.status === 429) {
@@ -832,11 +832,24 @@ function blastReplySystemPrompt() {
   ].join(" ");
 }
 
+function blastReplyRelaxedSystemPrompt() {
+  return [
+    blastReplySystemPrompt(),
+    "Return a single JSON object with exactly these keys: classification, summary, evidence, confidence, reviewStatus.",
+    "Do not wrap the JSON in markdown."
+  ].join(" ");
+}
+
 function blastReplyUserContent({ text, phrase }) {
   return JSON.stringify({
     blastContext: phrase || "",
     replyText: truncateForAi(text)
   });
+}
+
+function isOpenRouterParameterRoutingIssue(reason = "") {
+  const clean = String(reason).toLowerCase();
+  return clean.includes("no endpoints found") || clean.includes("requested parameters") || clean.includes("provider routing");
 }
 
 async function requestAiClassification({ text, phrase }) {
@@ -854,32 +867,59 @@ async function requestAiClassification({ text, phrase }) {
       headers["X-OpenRouter-Title"] = appName;
     }
 
+    const strictBody = {
+      model: openAiModel,
+      messages: [
+        { role: "system", content: blastReplySystemPrompt() },
+        { role: "user", content: blastReplyUserContent({ text, phrase }) }
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "blast_reply_classification",
+          strict: true,
+          schema
+        }
+      },
+      provider: { require_parameters: true },
+      temperature: 0,
+      max_tokens: 250
+    };
+    const relaxedBody = {
+      model: openAiModel,
+      messages: [
+        { role: "system", content: blastReplyRelaxedSystemPrompt() },
+        { role: "user", content: blastReplyUserContent({ text, phrase }) }
+      ],
+      temperature: 0,
+      max_tokens: 250
+    };
+
     const response = await fetch(`${aiBaseUrl}/chat/completions`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: openAiModel,
-        messages: [
-          { role: "system", content: blastReplySystemPrompt() },
-          { role: "user", content: blastReplyUserContent({ text, phrase }) }
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "blast_reply_classification",
-            strict: true,
-            schema
-          }
-        },
-        provider: { require_parameters: true },
-        temperature: 0,
-        max_tokens: 250
-      }),
+      body: JSON.stringify(strictBody),
       signal: AbortSignal.timeout(15000)
     });
     if (!response.ok) {
+      const fallbackReason = await openAiErrorReason(response);
+      if (isOpenRouterParameterRoutingIssue(fallbackReason)) {
+        const relaxedResponse = await fetch(`${aiBaseUrl}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(relaxedBody),
+          signal: AbortSignal.timeout(15000)
+        });
+        if (relaxedResponse.ok) {
+          const relaxedData = await relaxedResponse.json();
+          return parseJsonObject(extractChatCompletionText(relaxedData));
+        }
+        const relaxedError = new Error(`${aiProviderLabel} classification failed with ${relaxedResponse.status}`);
+        relaxedError.fallbackReason = await openAiErrorReason(relaxedResponse);
+        throw relaxedError;
+      }
       const error = new Error(`${aiProviderLabel} classification failed with ${response.status}`);
-      error.fallbackReason = await openAiErrorReason(response);
+      error.fallbackReason = fallbackReason;
       throw error;
     }
     const data = await response.json();

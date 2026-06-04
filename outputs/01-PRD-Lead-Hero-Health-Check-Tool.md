@@ -119,8 +119,11 @@ Outputs:
 - Confidence score
 - Analysis method: AI, rules fallback, or sample
 - Review status
+- Saved timestamp
 
 AI classification is used only to summarize and categorize reply intent. It must not send messages, update HighLevel records, add tags, move opportunities, or trigger workflows. Low-confidence or ambiguous replies should be marked `Needs review`.
+
+Saved blast analyses should be shown newest first wherever they are selected for a monthly check. Users can clear the currently loaded Blast Analyzer result from the screen so a fresh run can be reviewed without confusion. Clearing the loaded result must not delete the saved analysis from production storage and must not change anything in HighLevel.
 
 ### ClickUp Posting
 
@@ -287,7 +290,9 @@ Next Month Focus:
 6. Tool finds matching contacts and conversations.
 7. Tool classifies replies with AI when `OPENAI_API_KEY` is configured, otherwise it uses the built-in rules fallback.
 8. User saves the blast analysis.
-9. Saved blast analysis can later be attached to a monthly report.
+9. Saved blast analyses appear newest first with saved date and time.
+10. User can clear the currently displayed analysis from the Blast Analyzer screen without deleting it from storage.
+11. Saved blast analysis can later be attached to a monthly report.
 
 For live HighLevel checks, the reply tag identifies the candidate contacts, but the selected date range should apply to inbound conversation messages. Older contacts who reply during the selected blast window should still be included.
 

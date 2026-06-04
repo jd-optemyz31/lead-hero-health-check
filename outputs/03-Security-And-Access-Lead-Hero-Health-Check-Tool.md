@@ -424,6 +424,8 @@ AI requests must not include:
 
 AI provider failures, timeouts, invalid JSON, and missing API keys should fall back to local rules. Ambiguous or low-confidence AI results should be marked `Needs review` and reviewed by a human before being included in a monthly ClickUp comment.
 
+When OpenRouter cannot route strict structured-output parameters for a selected model, the server may retry once with a JSON-only chat request. This retry must follow the same data boundary: only the minimal reply excerpt and optional blast phrase are sent, and no HighLevel PITs, ClickUp tokens, Supabase service keys, or app secrets are included.
+
 ### Encryption
 
 Use a server-side encryption key:

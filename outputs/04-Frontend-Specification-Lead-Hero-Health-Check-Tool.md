@@ -141,6 +141,7 @@ Main elements:
 - Results summary
 - Reply classification table
 - Save Analysis button
+- Clear loaded result button when an analysis is displayed
 
 Result cards:
 
@@ -162,6 +163,8 @@ Table columns:
 - Method
 - Review status
 
+Saved blast analyses should be sorted newest first in selection controls. Option labels should include client, saved date/time, analysis date range, reply tag, and source where practical. Clearing a loaded Blast Analyzer result should only hide the current on-screen result; it must not delete the saved analysis from storage.
+
 ### Monthly Check
 
 Purpose:
@@ -179,6 +182,8 @@ Main elements:
 - Traffic light result
 - Evidence sections
 - Generated ClickUp comment preview
+
+The saved blast analysis selector should show the latest saved analysis at the top and include the saved date/time so repeated runs can be distinguished.
 
 Sections:
 

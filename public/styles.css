@@ -373,6 +373,18 @@ textarea:focus {
   margin-top: 16px;
 }
 
+.panel-tools {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.panel-tools .actions {
+  margin-top: 0;
+}
+
 .btn {
   min-height: 38px;
   border: 1px solid transparent;

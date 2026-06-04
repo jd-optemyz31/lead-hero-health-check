@@ -29,6 +29,8 @@ const state = {
   auth: { required: false, user: null },
   selectedReportId: "",
   editingClientId: "",
+  activeBlastAnalysisId: "",
+  blastResultsCleared: false,
   toast: ""
 };
 
@@ -383,6 +385,34 @@ function currentClientId() {
   return state.clients[0]?.id || "";
 }
 
+function timestampValue(value) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function newestFirstByCreatedAt(items = []) {
+  return [...items].sort((a, b) => timestampValue(b.createdAt) - timestampValue(a.createdAt));
+}
+
+function formatSavedAt(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "saved time unknown";
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
+function blastAnalysisOptionLabel(item) {
+  const clientName = item.clientName || "Unknown client";
+  const replyTag = item.replyTag || "reply tag not set";
+  const source = item.source === "live" ? "live" : "sample";
+  return `${clientName} - saved ${formatSavedAt(item.createdAt)} - ${item.dateStart} to ${item.dateEnd} - ${replyTag} - ${source}`;
+}
+
 function isAdminUser() {
   return state.auth?.user?.role === "admin";
 }
@@ -700,7 +730,15 @@ function renderRouting() {
 }
 
 function renderBlast() {
-  const latest = state.blastAnalyses[0];
+  const savedBlastAnalyses = newestFirstByCreatedAt(state.blastAnalyses);
+  const latest = state.blastResultsCleared
+    ? null
+    : state.activeBlastAnalysisId
+      ? savedBlastAnalyses.find((item) => item.id === state.activeBlastAnalysisId) || savedBlastAnalyses[0]
+      : savedBlastAnalyses[0];
+  const clearAction = latest
+    ? `<button class="btn secondary" type="button" data-clear-blast-result>Clear loaded result</button>`
+    : "";
   const rows = latest?.replies?.map((reply) => `
     <tr>
       <td><strong>${escapeHtml(reply.contactName)}</strong><br><span class="muted">${escapeHtml(reply.contactId)}</span></td>
@@ -732,7 +770,7 @@ function renderBlast() {
           <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.play} Run analysis</button></div>
         </form>
       </section>
-      ${latest ? renderBlastResult(latest, rows) : `<div class="empty">No blast analysis has been run yet.</div>`}
+      ${latest ? renderBlastResult(latest, rows, clearAction) : `<div class="empty">${state.blastResultsCleared ? "No blast analysis is loaded. Run analysis to show fresh results." : "No blast analysis has been run yet."}</div>`}
     </div>
   `, "Blast Analyzer", "Analyze blast replies independently from the monthly maintenance check.");
 
@@ -742,14 +780,24 @@ function renderBlast() {
     try {
       const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
       state.blastAnalyses = payload.blastAnalyses;
+      state.activeBlastAnalysisId = payload.analysis.id;
+      state.blastResultsCleared = false;
       showToast(`${payload.analysis.source === "live" ? "Live HighLevel" : "Sample"} blast analysis saved.`);
     } catch (error) {
       showToast(errorMessage(error));
     }
   });
+
+  document.querySelectorAll("[data-clear-blast-result]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.activeBlastAnalysisId = "";
+      state.blastResultsCleared = true;
+      showToast("Loaded blast analysis cleared from this screen.");
+    });
+  });
 }
 
-function renderBlastResult(analysis, rows) {
+function renderBlastResult(analysis, rows, actions = "") {
   return `
     <section class="grid six">
       ${metricCard("Replied contacts", analysis.totalRepliedContacts, analysis.replyTag)}
@@ -761,8 +809,11 @@ function renderBlastResult(analysis, rows) {
     </section>
     <section class="panel">
       <div class="panel-header">
-          <div><h2>Conversation classifications</h2><p>${escapeHtml(analysis.summary)}</p></div>
-          <div class="badge-group">${sourceBadge(analysis.source)}${badge(analysis.analysisMethod || "Rules")}${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}</div>
+          <div><h2>Conversation classifications</h2><p>${escapeHtml(analysis.summary)} Saved ${escapeHtml(formatSavedAt(analysis.createdAt))}.</p></div>
+          <div class="panel-tools">
+            <div class="badge-group">${sourceBadge(analysis.source)}${badge(analysis.analysisMethod || "Rules")}${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}</div>
+            <div class="actions">${actions}</div>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
@@ -777,8 +828,9 @@ function renderBlastResult(analysis, rows) {
 function renderMonthly() {
   const latest = state.reports[0];
   const client = state.clients.find((item) => item.id === (latest?.clientId || currentClientId()));
+  const savedBlastAnalyses = newestFirstByCreatedAt(state.blastAnalyses);
   const blastOptions = [`<option value="">Do not include blast analysis</option>`]
-    .concat(state.blastAnalyses.map((item) => `<option value="${item.id}">${escapeHtml(item.clientName)} - ${item.dateStart} to ${item.dateEnd} - ${escapeHtml(item.replyTag)}</option>`))
+    .concat(savedBlastAnalyses.map((item) => `<option value="${item.id}">${escapeHtml(blastAnalysisOptionLabel(item))}</option>`))
     .join("");
   const action = latest ? `<button class="btn primary" type="button" data-post-clickup="${latest.id}">${icons.post} Post to ClickUp</button>` : "";
 
