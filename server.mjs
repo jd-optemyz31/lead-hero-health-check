@@ -712,10 +712,41 @@ function classifyBlastReply(text) {
 }
 
 const blastClassificationLabels = new Set(["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]);
+const blastClassificationAliases = new Map([
+  ["positive", "Positive"],
+  ["interested", "Positive"],
+  ["interest", "Positive"],
+  ["neutral", "Neutral"],
+  ["negative", "Negative"],
+  ["not_interested", "Negative"],
+  ["not interested", "Negative"],
+  ["low_interest", "Negative"],
+  ["low interest", "Negative"],
+  ["opt-out", "Opt-out"],
+  ["opt out", "Opt-out"],
+  ["optout", "Opt-out"],
+  ["opt_out", "Opt-out"],
+  ["unsubscribe", "Opt-out"],
+  ["needs review", "Needs review"],
+  ["needs_review", "Needs review"],
+  ["review needed", "Needs review"],
+  ["manual review", "Needs review"]
+]);
 
 function normalizeBlastClassification(value) {
   const label = String(value || "").trim();
-  return blastClassificationLabels.has(label) ? label : "Needs review";
+  if (blastClassificationLabels.has(label)) return label;
+  const normalized = label
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return blastClassificationAliases.get(normalized) || "Needs review";
+}
+
+function normalizeReviewStatus(classification) {
+  if (classification === "Needs review") return "Review needed";
+  return "Auto-classified";
 }
 
 function clampConfidence(value) {
@@ -1035,12 +1066,7 @@ async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply
     const parsed = await requestAiClassification({ text, phrase, thread });
     const classification = normalizeBlastClassification(parsed?.classification);
     const confidence = clampConfidence(parsed?.confidence);
-    const aiRequestedReview = parsed?.reviewStatus === "Review needed";
-
-    const reviewStatus = classification === "Needs review"
-      || (aiRequestedReview && !["Positive", "Negative", "Neutral", "Opt-out"].includes(classification))
-      ? "Review needed"
-      : "Auto-classified";
+    const reviewStatus = normalizeReviewStatus(classification);
 
     return {
       classification,
