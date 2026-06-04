@@ -719,6 +719,14 @@ function classifyBlastReply(text) {
   return "Neutral";
 }
 
+function explicitReplyGuardClassification(text) {
+  const clean = String(text || "").toLowerCase();
+  if (!clean.trim()) return null;
+  if (/\b(stop|unsubscribe|remove me|do not contact|don't contact)\b/.test(clean)) return "Opt-out";
+  if (/\b(no thanks|no thank you|not interested|not now|pass|do not need|don't need|no longer interested)\b/.test(clean)) return "Negative";
+  return null;
+}
+
 const blastClassificationLabels = new Set(["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]);
 const blastClassificationAliases = new Map([
   ["positive", "Positive"],
@@ -945,12 +953,16 @@ function blastReplySystemPrompt() {
   return [
     "You classify inbound replies to HighLevel blast campaigns for an internal Lead Hero health check.",
     "Return only structured JSON. Do not recommend sending messages, updating contacts, changing opportunities, or triggering workflows.",
+    "The classification target is the latest inbound customer reply only.",
+    "Blast message text and outbound messages are context only; never classify a reply as Positive because the outbound blast contained an offer.",
+    "If the latest inbound customer reply clearly says they are not interested, the classification must be Negative.",
     "Use semantic intent, not a fixed keyword list. Customers can express the same intent in many ways.",
     "Positive means the reply shows interest, asks a buying or service question, asks for next steps, wants details, or indicates willingness to continue.",
     "Negative means the reply clearly declines, rejects, says they are not a fit, or shows no interest.",
     "Opt-out means the reply asks not to be contacted or to unsubscribe.",
     "Neutral means the reply is understandable but does not clearly show interest or rejection.",
     "Needs review means AI cannot explicitly tell whether it is positive, negative, neutral, or opt-out, the reply text is missing, the reply is contradictory, or the evidence is a call record rather than a text reply.",
+    "The summary and evidence must describe the inbound customer reply, not the outbound blast copy.",
     "Do not use Needs review when the text clearly supports another label."
   ].join(" ");
 }
@@ -964,15 +976,19 @@ function blastReplyRelaxedSystemPrompt() {
 }
 
 function blastReplyUserContent({ text, phrase, thread = [] }) {
+  const messagesAfterBlast = thread.map((message) => ({
+    direction: message.direction,
+    time: message.time,
+    channel: message.channel,
+    text: truncateForAi(message.text, 700)
+  }));
+  const inboundCustomerMessages = messagesAfterBlast.filter((message) => message.direction === "inbound");
   return JSON.stringify({
+    task: "Classify the intent of latestInboundCustomerReplyText. Use inboundCustomerMessagesAfterBlast only as supporting context.",
     blastContext: phrase || "",
-    latestReplyText: truncateForAi(text),
-    messagesAfterBlast: thread.map((message) => ({
-      direction: message.direction,
-      time: message.time,
-      channel: message.channel,
-      text: truncateForAi(message.text, 700)
-    }))
+    latestInboundCustomerReplyText: truncateForAi(text),
+    inboundCustomerMessagesAfterBlast: inboundCustomerMessages,
+    contextNote: "Outbound blast text is intentionally not included as a classification signal. Do not classify from the offer wording."
   });
 }
 
@@ -1123,7 +1139,7 @@ function ruleBasedBlastAnalysis(text, phrase) {
   return {
     classification,
     summary: text
-      ? summaryForClassification(classification, phrase)
+      ? summaryForLatestReply(classification, text)
       : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
     evidence: text ? sanitizeApiDetail(text) : "",
     confidence,
@@ -1171,16 +1187,28 @@ async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply
     const confidence = parsed?.confidence === undefined || parsed?.confidence === null
       ? confidenceForClassification(classification)
       : clampConfidence(parsed.confidence);
-    const reviewStatus = normalizeReviewStatus(classification);
+    const guardedClassification = explicitReplyGuardClassification(text);
+    const finalClassification = guardedClassification && guardedClassification !== classification
+      ? guardedClassification
+      : classification;
+    const finalConfidence = guardedClassification && guardedClassification !== classification
+      ? Math.max(confidence, confidenceForClassification(guardedClassification))
+      : confidence;
+    const reviewStatus = normalizeReviewStatus(finalClassification);
+    const adjustedByGuard = finalClassification !== classification;
 
     return {
-      classification,
-      summary: sanitizeApiDetail(parsed?.summary || summaryForClassification(classification, phrase)),
+      classification: finalClassification,
+      summary: adjustedByGuard
+        ? summaryForLatestReply(finalClassification, text)
+        : sanitizeApiDetail(parsed?.summary || summaryForClassification(finalClassification, phrase)),
       evidence: sanitizeApiDetail(parsed?.evidence || fallback.evidence || text),
-      confidence,
+      confidence: finalConfidence,
       reviewStatus,
-      analysisMethod: "AI",
-      analysisNote: ""
+      analysisMethod: adjustedByGuard ? "AI + validation" : "AI",
+      analysisNote: adjustedByGuard
+        ? `Adjusted from ${classification} because the latest inbound reply clearly indicates ${finalClassification.toLowerCase()} intent.`
+        : ""
     };
   } catch (error) {
     return {
@@ -1730,7 +1758,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     acc[reply.classification] = (acc[reply.classification] || 0) + 1;
     return acc;
   }, {});
-  const aiClassifiedCount = replies.filter((reply) => reply.analysisMethod === "AI").length;
+  const aiClassifiedCount = replies.filter((reply) => String(reply.analysisMethod || "").startsWith("AI")).length;
   const fallbackClassifiedCount = replies.filter((reply) => String(reply.analysisMethod || "").includes("Rules")).length;
   const analysisMethod = aiClassifiedCount && fallbackClassifiedCount
     ? "AI + rules fallback"
@@ -1782,6 +1810,19 @@ function summaryForClassification(classification, phrase) {
     "Needs review": `Reply is ambiguous and should be reviewed manually before counting as positive or negative.`
   };
   return map[classification];
+}
+
+function summaryForLatestReply(classification, text) {
+  const excerpt = sanitizeApiDetail(text);
+  const suffix = excerpt ? `: "${excerpt}"` : ".";
+  const map = {
+    Positive: `Contact showed interest or asked a follow-up question${suffix}`,
+    Neutral: `Contact replied without clear buying intent${suffix}`,
+    Negative: `Contact declined or showed no interest${suffix}`,
+    "Opt-out": `Contact asked to stop receiving similar outreach${suffix}`,
+    "Needs review": `Reply should be reviewed manually before counting as positive or negative${suffix}`
+  };
+  return map[classification] || `Contact replied${suffix}`;
 }
 
 function evidenceForClassification(classification) {
