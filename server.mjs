@@ -749,7 +749,7 @@ function normalizeBlastClassification(value) {
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return blastClassificationAliases.get(normalized) || "Needs review";
+  return blastClassificationAliases.get(normalized) || null;
 }
 
 function normalizeReviewStatus(classification) {
@@ -790,12 +790,20 @@ function extractResponseText(payload) {
 }
 
 function extractChatCompletionText(payload) {
-  const content = payload?.choices?.[0]?.message?.content;
+  const message = payload?.choices?.[0]?.message || {};
+  const content = message.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content.map((item) => item.text || item.content || "").filter(Boolean).join("\n").trim();
   }
   return "";
+}
+
+function extractChatCompletionJson(payload) {
+  const message = payload?.choices?.[0]?.message || {};
+  if (message.parsed && typeof message.parsed === "object") return message.parsed;
+  if (message.refusal) return null;
+  return parseJsonObject(extractChatCompletionText(payload));
 }
 
 function parseJsonObject(text) {
@@ -985,7 +993,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
         });
         if (relaxedResponse.ok) {
           const relaxedData = await relaxedResponse.json();
-          return parseJsonObject(extractChatCompletionText(relaxedData));
+          return extractChatCompletionJson(relaxedData);
         }
         const relaxedError = new Error(`${aiProviderLabel} classification failed with ${relaxedResponse.status}`);
         relaxedError.fallbackReason = await openAiErrorReason(relaxedResponse);
@@ -996,7 +1004,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       throw error;
     }
     const data = await response.json();
-    return parseJsonObject(extractChatCompletionText(data));
+    return extractChatCompletionJson(data);
   }
 
   const response = await fetch(`${aiBaseUrl}/responses`, {
@@ -1034,6 +1042,21 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
 
 function ruleBasedBlastAnalysis(text, phrase) {
   const classification = classifyBlastReply(text);
+  const confidence = confidenceForClassification(classification);
+  return {
+    classification,
+    summary: text
+      ? summaryForClassification(classification, phrase)
+      : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
+    evidence: text ? sanitizeApiDetail(text) : "",
+    confidence,
+    reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified",
+    analysisMethod: openAiApiKey ? "Rules fallback" : "Rules",
+    analysisNote: openAiApiKey ? "" : "OpenAI API key is not configured."
+  };
+}
+
+function confidenceForClassification(classification) {
   const confidenceMap = {
     Positive: 0.78,
     Neutral: 0.52,
@@ -1041,17 +1064,7 @@ function ruleBasedBlastAnalysis(text, phrase) {
     "Opt-out": 0.82,
     "Needs review": 0.35
   };
-  return {
-    classification,
-    summary: text
-      ? summaryForClassification(classification, phrase)
-      : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
-    evidence: text ? sanitizeApiDetail(text) : "",
-    confidence: confidenceMap[classification] || 0.5,
-    reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified",
-    analysisMethod: openAiApiKey ? "Rules fallback" : "Rules",
-    analysisNote: openAiApiKey ? "" : "OpenAI API key is not configured."
-  };
+  return confidenceMap[classification] || 0.5;
 }
 
 async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply = false }) {
@@ -1073,12 +1086,19 @@ async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply
   try {
     const parsed = await requestAiClassification({ text, phrase, thread });
     const classification = normalizeBlastClassification(parsed?.classification);
-    const confidence = clampConfidence(parsed?.confidence);
+    if (!classification) {
+      const error = new Error(`${aiProviderLabel} returned an invalid classification response.`);
+      error.fallbackReason = `${aiProviderLabel} returned an invalid classification response.`;
+      throw error;
+    }
+    const confidence = parsed?.confidence === undefined || parsed?.confidence === null
+      ? confidenceForClassification(classification)
+      : clampConfidence(parsed.confidence);
     const reviewStatus = normalizeReviewStatus(classification);
 
     return {
       classification,
-      summary: sanitizeApiDetail(parsed?.summary || fallback.summary),
+      summary: sanitizeApiDetail(parsed?.summary || summaryForClassification(classification, phrase)),
       evidence: sanitizeApiDetail(parsed?.evidence || fallback.evidence || text),
       confidence,
       reviewStatus,

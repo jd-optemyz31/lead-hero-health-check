@@ -95,6 +95,7 @@ Current MVP implementation:
 - In OpenRouter mode, if no endpoint can handle the strict structured-output parameters, the server retries once with a JSON-only chat request before falling back to local rules.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - The server normalizes common AI label variants, such as lowercase labels, `opt_out`, and `needs_review`, into the approved labels before saving or displaying results.
+- If the AI provider returns a partial response with no valid classification label, the server must reject that AI result and mark the row as rules fallback instead of displaying a mixed AI/fallback row.
 - AI classification uses semantic intent rather than a hardcoded phrase list. The local phrase-based classifier is only a fallback when AI is not configured or an AI request fails.
 - `Needs review` is reserved for cases where AI cannot explicitly determine intent, reply text is missing or contradictory, or the latest inbound evidence is a call record instead of text.
 - Only bounded blast-relevant conversation context should be sent to the AI service. The server tries to anchor the thread at the optional blast phrase and sends only capped messages after that blast within the selected date range; if no phrase is available, it sends only a capped selected-window thread for that contact. HighLevel PITs, ClickUp tokens, Supabase keys, full account exports, and unrelated contact history must never be sent.
