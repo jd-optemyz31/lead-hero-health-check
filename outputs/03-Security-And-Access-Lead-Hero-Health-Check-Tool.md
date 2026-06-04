@@ -393,16 +393,19 @@ Disconnect behavior:
 
 The ClickUp token should be stored as an environment variable or encrypted secret.
 
-### OpenAI API Key And AI Data Boundary
+### OpenAI / OpenRouter API Key And AI Data Boundary
 
-The OpenAI API key is an app-wide server secret. Store it only in Railway variables or another approved secret manager:
+The OpenAI or OpenRouter API key is an app-wide server secret. Store it only in Railway variables or another approved secret manager:
 
 ```text
+AI_PROVIDER
+OPENROUTER_API_KEY
 OPENAI_API_KEY
+OPENAI_BASE_URL
 OPENAI_MODEL
 ```
 
-AI classification is allowed only for Blast Analyzer reply analysis. The browser must never receive `OPENAI_API_KEY`, and users must not paste or store the key in client records.
+AI classification is allowed only for Blast Analyzer reply analysis. The browser must never receive `OPENROUTER_API_KEY` or `OPENAI_API_KEY`, and users must not paste or store either key in client records.
 
 AI requests may include:
 
@@ -415,10 +418,11 @@ AI requests must not include:
 - ClickUp API tokens.
 - Supabase service role keys.
 - `APP_ENCRYPTION_KEY`.
+- `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
 - Full client exports when a single reply excerpt is enough.
 - Any instruction to send a message, update a contact, add/remove tags, move an opportunity, or trigger a workflow.
 
-OpenAI failures, timeouts, invalid JSON, and missing `OPENAI_API_KEY` should fall back to local rules. Ambiguous or low-confidence AI results should be marked `Needs review` and reviewed by a human before being included in a monthly ClickUp comment.
+AI provider failures, timeouts, invalid JSON, and missing API keys should fall back to local rules. Ambiguous or low-confidence AI results should be marked `Needs review` and reviewed by a human before being included in a monthly ClickUp comment.
 
 ### Encryption
 
@@ -454,7 +458,10 @@ Railway variables should store app-wide secrets and configuration only:
 - `APP_ENCRYPTION_KEY`
 - `DATABASE_URL`
 - `CLICKUP_API_TOKEN`
+- `AI_PROVIDER`
+- `OPENROUTER_API_KEY`
 - `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 - `HIGHLEVEL_API_VERSION`
 - `AUTH_SECRET`
@@ -611,5 +618,5 @@ Recommended MVP policy:
 - ClickUp posting requires user review.
 - Audit logs are active.
 - Error messages do not expose secrets.
-- OpenAI classification, if enabled, receives only minimal reply excerpts and never receives PITs, app secrets, or ClickUp tokens.
+- OpenAI or OpenRouter classification, if enabled, receives only minimal reply excerpts and never receives PITs, app secrets, or ClickUp tokens.
 - Test token with write scopes cannot send anything because no write route exists.

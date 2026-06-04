@@ -12,11 +12,20 @@ const storePath = path.join(dataDir, "store.json");
 const port = Number(process.env.PORT || 5173);
 const highLevelBaseUrl = process.env.HIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com";
 const defaultHighLevelApiVersion = process.env.HIGHLEVEL_API_VERSION || "2021-07-28";
-const openAiApiKey = process.env.OPENAI_API_KEY || "";
-const configuredOpenAiModel = process.env.OPENAI_MODEL || "gpt-5.4-nano";
-const openAiModel = normalizeOpenAiModel(configuredOpenAiModel);
+const configuredAiBaseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE_URL || process.env.AI_BASE_URL || "";
+const detectedAiProvider = configuredAiBaseUrl.includes("openrouter") || process.env.OPENROUTER_API_KEY ? "openrouter" : "openai";
+const aiProvider = normalizeAiProvider(process.env.AI_PROVIDER || detectedAiProvider);
+const aiProviderLabel = aiProvider === "openrouter" ? "OpenRouter" : "OpenAI";
+const aiBaseUrl = normalizeAiBaseUrl(configuredAiBaseUrl || (aiProvider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1"));
+const openAiApiKey = aiProvider === "openrouter"
+  ? process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || ""
+  : process.env.OPENAI_API_KEY || "";
+const configuredOpenAiModel = process.env.OPENAI_MODEL || (aiProvider === "openrouter" ? "openai/gpt-5.4-nano" : "gpt-5.4-nano");
+const openAiModel = normalizeOpenAiModel(configuredOpenAiModel, aiProvider);
 const openAiModelWarning = configuredOpenAiModel !== openAiModel
-  ? `Using ${openAiModel}; remove the ${configuredOpenAiModel.split("/")[0]}/ prefix from OPENAI_MODEL.`
+  ? aiProvider === "openrouter"
+    ? `Using ${openAiModel}; OpenRouter model IDs include the provider prefix.`
+    : `Using ${openAiModel}; remove the ${configuredOpenAiModel.split("/")[0]}/ prefix from OPENAI_MODEL.`
   : "";
 const supabaseUrl = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
@@ -50,6 +59,7 @@ const defaultStore = {
       highLevelApiVersion: defaultHighLevelApiVersion,
       clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
       aiConnected: Boolean(openAiApiKey),
+      aiProvider,
       openAiModel,
       openAiModelWarning,
       safeMode: true
@@ -74,8 +84,20 @@ const roleRank = {
   admin: 3
 };
 
-function normalizeOpenAiModel(model) {
+function normalizeAiProvider(provider) {
+  const clean = String(provider || "openai").trim().toLowerCase();
+  return clean === "openrouter" ? "openrouter" : "openai";
+}
+
+function normalizeAiBaseUrl(value) {
+  return String(value || "").trim().replace(/\/$/, "");
+}
+
+function normalizeOpenAiModel(model, provider = "openai") {
   const clean = String(model || "gpt-5.4-nano").trim();
+  if (provider === "openrouter") {
+    return clean.includes("/") ? clean : `openai/${clean}`;
+  }
   return clean.startsWith("openai/") ? clean.slice("openai/".length) : clean;
 }
 
@@ -279,6 +301,7 @@ async function readSupabaseStore() {
       highLevelApiVersion: defaultHighLevelApiVersion,
       clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
       aiConnected: Boolean(openAiApiKey),
+      aiProvider,
       openAiModel,
       openAiModelWarning,
       safeMode: true,
@@ -705,6 +728,15 @@ function extractResponseText(payload) {
   return chunks.join("\n").trim();
 }
 
+function extractChatCompletionText(payload) {
+  const content = payload?.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((item) => item.text || item.content || "").filter(Boolean).join("\n").trim();
+  }
+  return "";
+}
+
 function parseJsonObject(text) {
   if (!text) return null;
   try {
@@ -723,32 +755,168 @@ function parseJsonObject(text) {
 function openAiFallbackReason(error) {
   if (error?.fallbackReason) return error.fallbackReason;
   if (error?.name === "TimeoutError" || String(error?.message || "").toLowerCase().includes("timeout")) {
-    return "OpenAI request timed out.";
+    return `${aiProviderLabel} request timed out.`;
   }
   if (String(error?.message || "").includes("fetch failed")) {
-    return "OpenAI request could not reach the API.";
+    return `${aiProviderLabel} request could not reach the API.`;
   }
-  return "OpenAI classification did not complete.";
+  return `${aiProviderLabel} classification did not complete.`;
 }
 
 async function openAiErrorReason(response) {
   let detail = "";
+  let errorCode = "";
+  let errorType = "";
   try {
     const text = await response.text();
     const parsed = parseJsonObject(text);
     detail = parsed?.error?.message || text;
+    errorCode = parsed?.error?.code || "";
+    errorType = parsed?.error?.type || "";
   } catch {
     detail = "";
   }
   const safeDetail = sanitizeApiDetail(detail);
   const suffix = safeDetail ? ` ${safeDetail}` : "";
-  if (response.status === 400) return `OpenAI rejected the classification request.${suffix}`;
-  if (response.status === 401) return "OpenAI API key was rejected. Check OPENAI_API_KEY in Railway.";
-  if (response.status === 403) return `OpenAI model or account access is not allowed.${suffix}`;
-  if (response.status === 404) return `OpenAI model was not found. Check OPENAI_MODEL in Railway.${suffix}`;
-  if (response.status === 429) return "OpenAI rate limit or quota was hit.";
-  if (response.status >= 500) return "OpenAI API returned a server error.";
-  return `OpenAI request failed with status ${response.status}.${suffix}`;
+  if (response.status === 400) return `${aiProviderLabel} rejected the classification request.${suffix}`;
+  if (response.status === 401) return `${aiProviderLabel} API key was rejected. Check ${aiProvider === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY"} in Railway.`;
+  if (response.status === 403) return `${aiProviderLabel} model or account access is not allowed.${suffix}`;
+  if (response.status === 404) return `${aiProviderLabel} model was not found. Check OPENAI_MODEL in Railway.${suffix}`;
+  if (response.status === 429) {
+    if (errorCode === "insufficient_quota" || errorType === "insufficient_quota") {
+      return `${aiProviderLabel} quota is exhausted or billing is not active for this API project.${suffix}`;
+    }
+    if (errorCode === "rate_limit_exceeded" || errorType === "rate_limit_exceeded" || errorType === "tokens") {
+      return `${aiProviderLabel} rate limit was hit. Try again shortly or raise the project's rate limit.${suffix}`;
+    }
+    return `${aiProviderLabel} returned a 429 limit response.${suffix}`;
+  }
+  if (response.status >= 500) return `${aiProviderLabel} API returned a server error.`;
+  return `${aiProviderLabel} request failed with status ${response.status}.${suffix}`;
+}
+
+function blastReplyJsonSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["classification", "summary", "evidence", "confidence", "reviewStatus"],
+    properties: {
+      classification: {
+        type: "string",
+        enum: ["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]
+      },
+      summary: {
+        type: "string",
+        description: "One short sentence explaining the reply intent."
+      },
+      evidence: {
+        type: "string",
+        description: "A short, non-sensitive excerpt or rationale from the reply."
+      },
+      confidence: {
+        type: "number"
+      },
+      reviewStatus: {
+        type: "string",
+        enum: ["Auto-classified", "Review needed"]
+      }
+    }
+  };
+}
+
+function blastReplySystemPrompt() {
+  return [
+    "You classify inbound replies to HighLevel blast campaigns for an internal Lead Hero health check.",
+    "Return only structured JSON. Do not recommend sending messages, updating contacts, changing opportunities, or triggering workflows.",
+    "Use Needs review when intent is ambiguous, context is missing, or confidence is below 0.65."
+  ].join(" ");
+}
+
+function blastReplyUserContent({ text, phrase }) {
+  return JSON.stringify({
+    blastContext: phrase || "",
+    replyText: truncateForAi(text)
+  });
+}
+
+async function requestAiClassification({ text, phrase }) {
+  const schema = blastReplyJsonSchema();
+  if (aiProvider === "openrouter") {
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${openAiApiKey}`
+    };
+    const referer = process.env.OPENROUTER_SITE_URL || process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "";
+    const appName = process.env.OPENROUTER_APP_NAME || "Lead Hero Health Check Tool";
+    if (referer) headers["HTTP-Referer"] = referer;
+    if (appName) {
+      headers["X-Title"] = appName;
+      headers["X-OpenRouter-Title"] = appName;
+    }
+
+    const response = await fetch(`${aiBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: openAiModel,
+        messages: [
+          { role: "system", content: blastReplySystemPrompt() },
+          { role: "user", content: blastReplyUserContent({ text, phrase }) }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "blast_reply_classification",
+            strict: true,
+            schema
+          }
+        },
+        provider: { require_parameters: true },
+        temperature: 0,
+        max_tokens: 250
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok) {
+      const error = new Error(`${aiProviderLabel} classification failed with ${response.status}`);
+      error.fallbackReason = await openAiErrorReason(response);
+      throw error;
+    }
+    const data = await response.json();
+    return parseJsonObject(extractChatCompletionText(data));
+  }
+
+  const response = await fetch(`${aiBaseUrl}/responses`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${openAiApiKey}`
+    },
+    body: JSON.stringify({
+      model: openAiModel,
+      input: [
+        { role: "system", content: blastReplySystemPrompt() },
+        { role: "user", content: blastReplyUserContent({ text, phrase }) }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "blast_reply_classification",
+          strict: true,
+          schema
+        }
+      },
+      max_output_tokens: 250
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) {
+    const error = new Error(`${aiProviderLabel} classification failed with ${response.status}`);
+    error.fallbackReason = await openAiErrorReason(response);
+    throw error;
+  }
+  const data = await response.json();
+  return parseJsonObject(extractResponseText(data));
 }
 
 function ruleBasedBlastAnalysis(text, phrase) {
@@ -777,80 +945,8 @@ async function classifyBlastReplyWithAi({ text, phrase }) {
   if (!openAiApiKey || !text) return ruleBasedBlastAnalysis(text, phrase);
 
   const fallback = ruleBasedBlastAnalysis(text, phrase);
-  const payload = {
-    model: openAiModel,
-    input: [
-      {
-        role: "system",
-        content: [
-          "You classify inbound replies to HighLevel blast campaigns for an internal Lead Hero health check.",
-          "Return only structured JSON. Do not recommend sending messages, updating contacts, changing opportunities, or triggering workflows.",
-          "Use Needs review when intent is ambiguous, context is missing, or confidence is below 0.65."
-        ].join(" ")
-      },
-      {
-        role: "user",
-        content: JSON.stringify({
-          blastContext: phrase || "",
-          replyText: truncateForAi(text)
-        })
-      }
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "blast_reply_classification",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          required: ["classification", "summary", "evidence", "confidence", "reviewStatus"],
-          properties: {
-            classification: {
-              type: "string",
-              enum: ["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]
-            },
-            summary: {
-              type: "string",
-              description: "One short sentence explaining the reply intent."
-            },
-            evidence: {
-              type: "string",
-              description: "A short, non-sensitive excerpt or rationale from the reply."
-            },
-            confidence: {
-              type: "number"
-            },
-            reviewStatus: {
-              type: "string",
-              enum: ["Auto-classified", "Review needed"]
-            }
-          }
-        }
-      }
-    },
-    max_output_tokens: 250
-  };
-
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${openAiApiKey}`
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000)
-    });
-
-    if (!response.ok) {
-      const error = new Error(`OpenAI classification failed with ${response.status}`);
-      error.fallbackReason = await openAiErrorReason(response);
-      throw error;
-    }
-
-    const data = await response.json();
-    const parsed = parseJsonObject(extractResponseText(data));
+    const parsed = await requestAiClassification({ text, phrase });
     const classification = normalizeBlastClassification(parsed?.classification);
     const confidence = clampConfidence(parsed?.confidence);
     const reviewStatus = classification === "Needs review" || confidence < 0.65
@@ -1674,6 +1770,7 @@ async function handleApi(req, res, pathname) {
           highLevelApiVersion: defaultHighLevelApiVersion,
           clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
           aiConnected: Boolean(openAiApiKey),
+          aiProvider,
           openAiModel,
           openAiModelWarning,
           safeMode: true,
@@ -1691,6 +1788,7 @@ async function handleApi(req, res, pathname) {
         ...store.settings,
         clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
         aiConnected: Boolean(openAiApiKey),
+        aiProvider,
         openAiModel,
         openAiModelWarning,
         storage: supabaseConfigured ? "Supabase" : "Local",

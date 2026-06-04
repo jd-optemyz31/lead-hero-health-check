@@ -39,7 +39,7 @@ Admins can edit client connection details, including timezone and automation-flo
 
 ## AI Blast Analysis Decision
 
-Blast Analyzer can use OpenAI from the server only when `OPENAI_API_KEY` is configured. Results are presented as summary cards plus a reply table with classification, confidence, summary, evidence, method, and review status. If OpenAI is unavailable or uncertain, the tool uses rules fallback and marks uncertain replies as `Needs review`.
+Blast Analyzer can use OpenAI directly or through OpenRouter from the server only when an approved AI key is configured. OpenRouter mode uses `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and an OpenRouter model ID such as `openai/gpt-5.4-nano`. Results are presented as summary cards plus a reply table with classification, confidence, summary, evidence, method, and review status. If AI is unavailable or uncertain, the tool uses rules fallback and marks uncertain replies as `Needs review`.
 
 ## Brand Direction
 

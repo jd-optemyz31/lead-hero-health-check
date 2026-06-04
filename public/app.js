@@ -64,6 +64,7 @@ function seedStore() {
       highLevelApiVersion: "2021-07-28",
       clickupConnected: false,
       aiConnected: false,
+      aiProvider: "openai",
       openAiModel: "",
       safeMode: true,
       storage: "Local",
@@ -933,7 +934,7 @@ function renderSettings() {
         <div class="grid">
           ${metricCard("HighLevel API version", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
           ${metricCard("ClickUp connection", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "CLICKUP_API_TOKEN detected" : "Set CLICKUP_API_TOKEN for live posting")}
-          ${metricCard("AI classification", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.openAiModel || "OpenAI model"} configured server-side${state.settings.openAiModelWarning ? ` (${state.settings.openAiModelWarning})` : ""}` : "Set OPENAI_API_KEY to classify blast replies with AI")}
+          ${metricCard("AI classification", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} / ${state.settings.openAiModel || "model"} configured server-side${state.settings.openAiModelWarning ? ` (${state.settings.openAiModelWarning})` : ""}` : "Set OPENAI_API_KEY or OPENROUTER_API_KEY to classify blast replies with AI")}
           ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Supabase-backed production storage" : "Local JSON development storage")}
           ${metricCard("Authentication", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth enforced" : "Auth disabled for local development")}
           ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}

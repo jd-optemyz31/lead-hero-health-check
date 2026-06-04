@@ -81,19 +81,22 @@ Auth alternatives such as Clerk or Auth.js are still viable, but they add more i
 
 ### AI Reply Classification
 
-OpenAI API or another approved LLM provider.
+OpenAI API directly or through OpenRouter.
 
 Used only for analyzing conversation replies, not for sending messages.
 
 Current MVP implementation:
 
-- The Node server calls the OpenAI Responses API from the backend only.
-- `OPENAI_API_KEY` and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
+- The Node server calls the AI provider from the backend only.
+- OpenAI direct uses the Responses API.
+- OpenRouter uses the OpenAI-compatible Chat Completions API at `https://openrouter.ai/api/v1/chat/completions`.
+- `AI_PROVIDER`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
 - The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus`.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - Only the minimal reply text needed for classification and optional blast context should be sent to the AI service; HighLevel PITs, ClickUp tokens, Supabase keys, and full account exports must never be sent.
-- If OpenAI is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier, marks the method as `Rules` or `Rules fallback`, and shows a safe fallback reason without exposing keys or raw secrets.
-- The default OpenAI model is `gpt-5.4-nano`, chosen for high-volume classification and extraction-style work. Use the OpenAI API model ID directly; provider prefixes such as `openai/` are normalized away for API calls and surfaced as a setup warning.
+- If the AI provider is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier, marks the method as `Rules` or `Rules fallback`, and shows a safe fallback reason without exposing keys or raw secrets.
+- For OpenRouter, set `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and `OPENAI_MODEL=openai/gpt-5.4-nano`.
+- For OpenAI direct, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL=gpt-5.4-nano`.
 
 ### Hosting
 
@@ -513,8 +516,13 @@ Responsibilities:
 DATABASE_URL=
 APP_ENCRYPTION_KEY=
 CLICKUP_API_TOKEN=
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+OPENROUTER_SITE_URL=
+OPENROUTER_APP_NAME=Lead Hero Health Check Tool
 OPENAI_API_KEY=
-OPENAI_MODEL=gpt-5.4-nano
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_MODEL=openai/gpt-5.4-nano
 HIGHLEVEL_API_VERSION=2021-07-28
 SUPABASE_URL=
 SUPABASE_ANON_KEY=
@@ -531,7 +539,7 @@ Client-specific HighLevel PITs should be encrypted in the database, not stored a
 
 Railway variable guidance:
 
-- Store app-wide secrets in Railway: `APP_ENCRYPTION_KEY`, `DATABASE_URL`, `CLICKUP_API_TOKEN`, `OPENAI_API_KEY`, `AUTH_SECRET`, and Supabase server-side credentials.
+- Store app-wide secrets in Railway: `APP_ENCRYPTION_KEY`, `DATABASE_URL`, `CLICKUP_API_TOKEN`, `OPENROUTER_API_KEY` or `OPENAI_API_KEY`, `AUTH_SECRET`, and Supabase server-side credentials.
 - Do not store client HighLevel PITs in Railway variables.
 - Do not expose server-only secrets through any `NEXT_PUBLIC_` variable.
 - Use separate Railway environments and separate secrets for development, staging, and production.
