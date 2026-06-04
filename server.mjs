@@ -848,7 +848,7 @@ function extractChatCompletionJson(payload) {
   }
   const parsed = parseJsonObject(extractChatCompletionText(payload));
   if (parsed) return flattenAiClassificationObject(parsed);
-  // Reasoning models may produce null content — fall back to extracting from reasoning text
+  // Reasoning models may produce null content, so fall back to extracting from reasoning text.
   const reasoning = typeof message.reasoning === "string" ? message.reasoning
     : message.reasoning_details?.find?.(d => typeof d?.text === "string")?.text || null;
   return extractClassificationFromReasoning(reasoning);
@@ -1035,7 +1035,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(45000)
       });
       if (!response.ok) {
         const errorText = await response.text();
@@ -1104,7 +1104,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
           schema
         }
       },
-      max_output_tokens: 250
+      max_output_tokens: 1500
     }),
     signal: AbortSignal.timeout(15000)
   });
