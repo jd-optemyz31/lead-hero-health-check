@@ -658,11 +658,11 @@ function hasAttribution(contact) {
 
 function classifyBlastReply(text) {
   const clean = String(text || "").toLowerCase();
+  if (!clean.trim()) return "Needs review";
   if (/(stop|unsubscribe|remove me|do not contact|don't contact)/.test(clean)) return "Opt-out";
-  if (/(yes|interested|send|info|details|call me|book|schedule)/.test(clean)) return "Positive";
-  if (/(no thanks|not interested|already have|too expensive|pass)/.test(clean)) return "Negative";
-  if (clean.trim()) return "Neutral";
-  return "Needs review";
+  if (/(no thanks|not interested|not now|already have|too expensive|pass|do not need|don't need|no longer interested)/.test(clean)) return "Negative";
+  if (/(yes|interested|send|info|details|tell me more|more about|price|pricing|quote|cost|how much|call me|book|schedule)/.test(clean)) return "Positive";
+  return "Neutral";
 }
 
 const blastClassificationLabels = new Set(["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]);
@@ -1277,6 +1277,14 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     acc[reply.classification] = (acc[reply.classification] || 0) + 1;
     return acc;
   }, {});
+  const aiClassifiedCount = replies.filter((reply) => reply.analysisMethod === "AI").length;
+  const fallbackClassifiedCount = replies.filter((reply) => String(reply.analysisMethod || "").includes("Rules")).length;
+  const analysisMethod = aiClassifiedCount && fallbackClassifiedCount
+    ? "AI + rules fallback"
+    : aiClassifiedCount ? "AI" : openAiApiKey ? "Rules fallback" : "Rules";
+  const methodSummary = aiClassifiedCount
+    ? `${aiClassifiedCount} reply/replies were classified by AI${fallbackClassifiedCount ? ` and ${fallbackClassifiedCount} used rules fallback` : ""}.`
+    : `${fallbackClassifiedCount} reply/replies used rules fallback${openAiApiKey ? " because AI classification did not complete" : " because OpenAI is not configured"}.`;
 
   return {
     id: crypto.randomUUID(),
@@ -1296,9 +1304,9 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     negativeCount: counts.Negative || 0,
     optOutCount: counts["Opt-out"] || 0,
     needsReviewCount: counts["Needs review"] || 0,
-    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${openAiApiKey ? "AI classification was used where reply text was available." : "Rule-based classification was used because OpenAI is not configured."}`,
+    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${methodSummary}`,
     source: "live",
-    analysisMethod: openAiApiKey ? "AI-assisted" : "Rules",
+    analysisMethod,
     replies,
     createdAt: new Date().toISOString()
   };
@@ -1307,9 +1315,9 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
 function summaryForClassification(classification, phrase) {
   const context = phrase ? `the "${phrase}" blast` : "the blast";
   const map = {
-    Positive: `Contact showed interest in ${context} and should be followed up by the CAM or sales team.`,
+    Positive: `Contact showed interest in ${context} or asked for more information.`,
     Neutral: `Contact replied without clear buying intent. Conversation may need light review.`,
-    Negative: `Contact indicated low interest or objected to the offer.`,
+    Negative: `Contact declined ${context} or indicated no interest.`,
     "Opt-out": `Contact asked to stop receiving similar outreach.`,
     "Needs review": `Reply is ambiguous and should be reviewed manually before counting as positive or negative.`
   };
@@ -1318,9 +1326,9 @@ function summaryForClassification(classification, phrase) {
 
 function evidenceForClassification(classification) {
   const map = {
-    Positive: "Inbound reply contains interest language such as yes, interested, or can you send more info.",
+    Positive: "Inbound reply contains interest language, a request for details, or a pricing question.",
     Neutral: "Inbound reply is short or unclear.",
-    Negative: "Inbound reply contains no thanks or not interested language.",
+    Negative: "Inbound reply contains no thanks, not interested, or similar decline language.",
     "Opt-out": "Inbound reply asks to stop or remove.",
     "Needs review": "Conversation context is not clear enough for automatic classification."
   };
