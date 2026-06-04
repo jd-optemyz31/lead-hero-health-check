@@ -821,6 +821,23 @@ function flattenAiClassificationObject(obj) {
   return obj;
 }
 
+function extractClassificationFromReasoning(reasoning) {
+  if (!reasoning || typeof reasoning !== "string") return null;
+  const patterns = [
+    { re: /classif(?:y|ication)[^.]*?\bpositive\b/i, value: "Positive" },
+    { re: /classif(?:y|ication)[^.]*?\bnegative\b/i, value: "Negative" },
+    { re: /classif(?:y|ication)[^.]*?\bopt.?out\b/i, value: "Opt-out" },
+    { re: /classif(?:y|ication)[^.]*?\bneutral\b/i, value: "Neutral" },
+    { re: /\bclassif(?:y|ication)\b.*?\bneeds.?review\b/i, value: "Needs review" },
+    { re: /\bpositive\b.*?\bclassif/i, value: "Positive" },
+    { re: /\bnegative\b.*?\bclassif/i, value: "Negative" },
+  ];
+  for (const { re, value } of patterns) {
+    if (re.test(reasoning)) return { classification: value, confidence: 0.7, summary: "", evidence: "", reviewStatus: "Auto-classified" };
+  }
+  return null;
+}
+
 function extractChatCompletionJson(payload) {
   const message = payload?.choices?.[0]?.message || {};
   if (message.parsed && typeof message.parsed === "object") return flattenAiClassificationObject(message.parsed);
@@ -830,7 +847,11 @@ function extractChatCompletionJson(payload) {
     return flattenAiClassificationObject(content);
   }
   const parsed = parseJsonObject(extractChatCompletionText(payload));
-  return parsed ? flattenAiClassificationObject(parsed) : null;
+  if (parsed) return flattenAiClassificationObject(parsed);
+  // Reasoning models may produce null content — fall back to extracting from reasoning text
+  const reasoning = typeof message.reasoning === "string" ? message.reasoning
+    : message.reasoning_details?.find?.(d => typeof d?.text === "string")?.text || null;
+  return extractClassificationFromReasoning(reasoning);
 }
 
 function parseJsonObject(text) {
@@ -997,7 +1018,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       },
       provider: { require_parameters: true },
       temperature: 0,
-      max_tokens: 250
+      max_tokens: 1500
     };
     const relaxedBody = {
       model: openAiModel,
@@ -1007,7 +1028,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       ],
       response_format: { type: "json_object" },
       temperature: 0,
-      max_tokens: 250
+      max_tokens: 1500
     };
     const requestOpenRouter = async (body) => {
       const response = await fetch(`${aiBaseUrl}/chat/completions`, {
@@ -1055,7 +1076,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
         { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
       ],
       temperature: 0,
-      max_tokens: 250
+      max_tokens: 1500
     };
     try {
       const plainParsed = await requestOpenRouter(plainBody);
