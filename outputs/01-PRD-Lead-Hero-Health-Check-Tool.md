@@ -121,7 +121,11 @@ Outputs:
 - Review status
 - Saved timestamp
 
-AI classification is used only to summarize and categorize reply intent. It must not send messages, update HighLevel records, add tags, move opportunities, or trigger workflows. Low-confidence or ambiguous replies should be marked `Needs review`.
+AI classification is used only to summarize and categorize reply intent. It must not send messages, update HighLevel records, add tags, move opportunities, or trigger workflows.
+
+AI should classify intent semantically, not by a fixed phrase list. `Positive` means the contact shows interest, asks a buying or service question, wants details, or indicates willingness to continue. `Negative` means the contact clearly declines or shows no interest. `Opt-out` means the contact asks not to be contacted or to unsubscribe. `Neutral` means understandable but no clear interest or rejection. `Needs review` should only be used when AI cannot explicitly tell the intent, the reply text is missing or contradictory, or the contact responded through a call record instead of a text reply.
+
+When AI is used, the tool should send a bounded post-blast conversation thread, not the full contact history. If the optional blast message phrase is provided and found, AI receives only the matched blast context and messages after that blast within the selected date range. If no phrase is provided or no match is found, AI receives only a small capped thread from the selected date range for that contact.
 
 Saved blast analyses should be shown newest first wherever they are selected for a monthly check. Users can clear the currently loaded Blast Analyzer result from the screen so a fresh run can be reviewed without confusion. Clearing the loaded result must not delete the saved analysis from production storage and must not change anything in HighLevel.
 

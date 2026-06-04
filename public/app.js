@@ -30,6 +30,7 @@ const state = {
   selectedReportId: "",
   editingClientId: "",
   activeBlastAnalysisId: "",
+  activeBlastAnalysis: null,
   blastResultsCleared: false,
   toast: ""
 };
@@ -733,6 +734,8 @@ function renderBlast() {
   const savedBlastAnalyses = newestFirstByCreatedAt(state.blastAnalyses);
   const latest = state.blastResultsCleared
     ? null
+    : state.activeBlastAnalysis
+      ? state.activeBlastAnalysis
     : state.activeBlastAnalysisId
       ? savedBlastAnalyses.find((item) => item.id === state.activeBlastAnalysisId) || savedBlastAnalyses[0]
       : savedBlastAnalyses[0];
@@ -748,7 +751,7 @@ function renderBlast() {
       <td>${escapeHtml(reply.summary)}</td>
       <td>${escapeHtml(reply.evidence)}</td>
       <td>${escapeHtml(reply.analysisMethod || "Rules")}</td>
-      <td>${escapeHtml(reply.reviewStatus)}${reply.analysisNote ? `<br><span class="muted">${escapeHtml(reply.analysisNote)}</span>` : ""}</td>
+      <td>${escapeHtml(reply.reviewStatus)}${reply.analysisNote ? `<br><span class="muted">${escapeHtml(reply.analysisNote)}</span>` : ""}${reply.threadMessageCount ? `<br><span class="muted">${escapeHtml(`${reply.threadMessageCount} post-blast message(s) reviewed${reply.blastContextMatched ? " after matched blast" : ""}.`)}</span>` : ""}</td>
     </tr>
   `).join("");
 
@@ -778,10 +781,15 @@ function renderBlast() {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
     try {
-      const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
-      state.blastAnalyses = payload.blastAnalyses;
-      state.activeBlastAnalysisId = payload.analysis.id;
       state.blastResultsCleared = false;
+      state.activeBlastAnalysis = null;
+      const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
+      state.activeBlastAnalysis = payload.analysis;
+      state.blastAnalyses = newestFirstByCreatedAt([
+        payload.analysis,
+        ...(payload.blastAnalyses || []).filter((item) => item.id !== payload.analysis.id)
+      ]);
+      state.activeBlastAnalysisId = payload.analysis.id;
       showToast(`${payload.analysis.source === "live" ? "Live HighLevel" : "Sample"} blast analysis saved.`);
     } catch (error) {
       showToast(errorMessage(error));
@@ -791,6 +799,7 @@ function renderBlast() {
   document.querySelectorAll("[data-clear-blast-result]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeBlastAnalysisId = "";
+      state.activeBlastAnalysis = null;
       state.blastResultsCleared = true;
       showToast("Loaded blast analysis cleared from this screen.");
     });

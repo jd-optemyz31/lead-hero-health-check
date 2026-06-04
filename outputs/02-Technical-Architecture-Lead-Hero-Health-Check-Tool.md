@@ -94,7 +94,9 @@ Current MVP implementation:
 - The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus` where the provider can route those parameters.
 - In OpenRouter mode, if no endpoint can handle the strict structured-output parameters, the server retries once with a JSON-only chat request before falling back to local rules.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
-- Only the minimal reply text needed for classification and optional blast context should be sent to the AI service; HighLevel PITs, ClickUp tokens, Supabase keys, and full account exports must never be sent.
+- AI classification uses semantic intent rather than a hardcoded phrase list. The local phrase-based classifier is only a fallback when AI is not configured or an AI request fails.
+- `Needs review` is reserved for cases where AI cannot explicitly determine intent, reply text is missing or contradictory, or the latest inbound evidence is a call record instead of text.
+- Only bounded blast-relevant conversation context should be sent to the AI service. The server tries to anchor the thread at the optional blast phrase and sends only capped messages after that blast within the selected date range; if no phrase is available, it sends only a capped selected-window thread for that contact. HighLevel PITs, ClickUp tokens, Supabase keys, full account exports, and unrelated contact history must never be sent.
 - If the AI provider is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier, marks the method as `Rules` or `Rules fallback`, and shows a safe fallback reason without exposing keys or raw secrets.
 - For OpenRouter, set `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and `OPENAI_MODEL=openai/gpt-5.4-nano`.
 - For OpenAI direct, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL=gpt-5.4-nano`.
@@ -497,7 +499,7 @@ Responsibilities:
 - Search contacts by reply tag and date range where supported
 - Pull conversations for matching contacts
 - Identify relevant replies
-- Classify replies with AI when configured, with a local rules fallback
+- Classify replies with AI when configured using a bounded post-blast thread, with a local rules fallback
 - Store classification, confidence, evidence, method, and review status
 - Save analysis results
 

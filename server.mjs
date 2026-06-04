@@ -651,6 +651,16 @@ function messagePhone(message) {
   return valueText(message, ["phone", "to", "from", "contactPhone", "phoneNumber"]);
 }
 
+function messageChannel(message) {
+  return valueText(message, ["channel", "messageChannel", "message_channel", "conversationProvider", "source", "medium"]);
+}
+
+function isCallMessage(message) {
+  const channel = messageChannel(message).toLowerCase();
+  const type = valueText(message, ["type", "messageType", "message_type"]).toLowerCase();
+  return channel.includes("call") || type.includes("call");
+}
+
 function isOutboundMessage(message) {
   const direction = valueText(message, ["direction", "messageDirection", "type"]).toLowerCase();
   return direction.includes("out") || direction.includes("sent");
@@ -715,6 +725,16 @@ function clampConfidence(value) {
 function truncateForAi(text, maxLength = 2000) {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   return clean.length > maxLength ? `${clean.slice(0, maxLength)}...` : clean;
+}
+
+function messageTimestamp(message) {
+  return valueText(message, ["dateAdded", "createdAt", "created_at", "timestamp", "time"]);
+}
+
+function messageDirectionLabel(message) {
+  if (isInboundMessage(message)) return "inbound";
+  if (isOutboundMessage(message)) return "outbound";
+  return "unknown";
 }
 
 function extractResponseText(payload) {
@@ -828,7 +848,13 @@ function blastReplySystemPrompt() {
   return [
     "You classify inbound replies to HighLevel blast campaigns for an internal Lead Hero health check.",
     "Return only structured JSON. Do not recommend sending messages, updating contacts, changing opportunities, or triggering workflows.",
-    "Use Needs review when intent is ambiguous, context is missing, or confidence is below 0.65."
+    "Use semantic intent, not a fixed keyword list. Customers can express the same intent in many ways.",
+    "Positive means the reply shows interest, asks a buying or service question, asks for next steps, wants details, or indicates willingness to continue.",
+    "Negative means the reply clearly declines, rejects, says they are not a fit, or shows no interest.",
+    "Opt-out means the reply asks not to be contacted or to unsubscribe.",
+    "Neutral means the reply is understandable but does not clearly show interest or rejection.",
+    "Needs review means AI cannot explicitly tell whether it is positive, negative, neutral, or opt-out, the reply text is missing, the reply is contradictory, or the evidence is a call record rather than a text reply.",
+    "Do not use Needs review when the text clearly supports another label."
   ].join(" ");
 }
 
@@ -840,10 +866,16 @@ function blastReplyRelaxedSystemPrompt() {
   ].join(" ");
 }
 
-function blastReplyUserContent({ text, phrase }) {
+function blastReplyUserContent({ text, phrase, thread = [] }) {
   return JSON.stringify({
     blastContext: phrase || "",
-    replyText: truncateForAi(text)
+    latestReplyText: truncateForAi(text),
+    messagesAfterBlast: thread.map((message) => ({
+      direction: message.direction,
+      time: message.time,
+      channel: message.channel,
+      text: truncateForAi(message.text, 700)
+    }))
   });
 }
 
@@ -852,7 +884,7 @@ function isOpenRouterParameterRoutingIssue(reason = "") {
   return clean.includes("no endpoints found") || clean.includes("requested parameters") || clean.includes("provider routing");
 }
 
-async function requestAiClassification({ text, phrase }) {
+async function requestAiClassification({ text, phrase, thread = [] }) {
   const schema = blastReplyJsonSchema();
   if (aiProvider === "openrouter") {
     const headers = {
@@ -871,7 +903,7 @@ async function requestAiClassification({ text, phrase }) {
       model: openAiModel,
       messages: [
         { role: "system", content: blastReplySystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase }) }
+        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
       ],
       response_format: {
         type: "json_schema",
@@ -889,7 +921,7 @@ async function requestAiClassification({ text, phrase }) {
       model: openAiModel,
       messages: [
         { role: "system", content: blastReplyRelaxedSystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase }) }
+        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
       ],
       temperature: 0,
       max_tokens: 250
@@ -936,7 +968,7 @@ async function requestAiClassification({ text, phrase }) {
       model: openAiModel,
       input: [
         { role: "system", content: blastReplySystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase }) }
+        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
       ],
       text: {
         format: {
@@ -962,9 +994,9 @@ async function requestAiClassification({ text, phrase }) {
 function ruleBasedBlastAnalysis(text, phrase) {
   const classification = classifyBlastReply(text);
   const confidenceMap = {
-    Positive: 0.62,
+    Positive: 0.78,
     Neutral: 0.52,
-    Negative: 0.62,
+    Negative: 0.78,
     "Opt-out": 0.82,
     "Needs review": 0.35
   };
@@ -981,20 +1013,35 @@ function ruleBasedBlastAnalysis(text, phrase) {
   };
 }
 
-async function classifyBlastReplyWithAi({ text, phrase }) {
+async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply = false }) {
+  if (isCallReply) {
+    return {
+      classification: "Needs review",
+      summary: "Contact replied through a call record, so text intent is not available for automatic positive or negative classification.",
+      evidence: text ? sanitizeApiDetail(text) : "Inbound reply evidence was a call record.",
+      confidence: 0.35,
+      reviewStatus: "Review needed",
+      analysisMethod: openAiApiKey ? "AI" : "Rules",
+      analysisNote: "Call reply requires manual review."
+    };
+  }
+
   if (!openAiApiKey || !text) return ruleBasedBlastAnalysis(text, phrase);
 
   const fallback = ruleBasedBlastAnalysis(text, phrase);
   try {
-    const parsed = await requestAiClassification({ text, phrase });
+    const parsed = await requestAiClassification({ text, phrase, thread });
     const classification = normalizeBlastClassification(parsed?.classification);
     const confidence = clampConfidence(parsed?.confidence);
-    const reviewStatus = classification === "Needs review" || confidence < 0.65
+    const aiRequestedReview = parsed?.reviewStatus === "Review needed";
+
+    const reviewStatus = classification === "Needs review"
+      || (aiRequestedReview && !["Positive", "Negative", "Neutral", "Opt-out"].includes(classification))
       ? "Review needed"
-      : parsed?.reviewStatus === "Review needed" ? "Review needed" : "Auto-classified";
+      : "Auto-classified";
 
     return {
-      classification: reviewStatus === "Review needed" && confidence < 0.65 ? "Needs review" : classification,
+      classification,
       summary: sanitizeApiDetail(parsed?.summary || fallback.summary),
       evidence: sanitizeApiDetail(parsed?.evidence || fallback.evidence || text),
       confidence,
@@ -1029,6 +1076,42 @@ function latestMessageForContact(messages, contactId, { inboundOnly = false } = 
   return messages
     .filter((message) => messageContactId(message) === contactId && (!inboundOnly || isInboundMessage(message)))
     .sort((a, b) => timestampOf(b) - timestampOf(a))[0];
+}
+
+function blastThreadForContact(messages, contactIdValue, messagePhrase) {
+  const contactMessages = messages
+    .filter((message) => messageContactId(message) === contactIdValue)
+    .sort((a, b) => timestampOf(a) - timestampOf(b));
+  if (!contactMessages.length) {
+    return { thread: [], latest: undefined, blastFound: false };
+  }
+
+  const phrase = String(messagePhrase || "").trim().toLowerCase();
+  const blastMessage = phrase
+    ? [...contactMessages]
+      .reverse()
+      .find((message) => isOutboundMessage(message) && messageText(message).toLowerCase().includes(phrase))
+    : undefined;
+  const blastTimestamp = blastMessage ? timestampOf(blastMessage) : 0;
+  const postBlastMessages = contactMessages
+    .filter((message) => !blastTimestamp || timestampOf(message) >= blastTimestamp)
+    .filter((message) => {
+      const text = messageText(message);
+      return text || isCallMessage(message);
+    })
+    .slice(-12);
+
+  const latest = [...postBlastMessages]
+    .reverse()
+    .find((message) => isInboundMessage(message));
+  const thread = postBlastMessages.map((message) => ({
+    direction: messageDirectionLabel(message),
+    time: messageTimestamp(message),
+    channel: messageChannel(message) || valueText(message, ["type", "messageType", "message_type"]) || "",
+    text: messageText(message)
+  }));
+
+  return { thread, latest, blastFound: Boolean(blastMessage) };
 }
 
 function countMissedCalls(messages) {
@@ -1427,16 +1510,19 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
   const contactsWithInboundReplies = contacts
     .map((contact) => {
       const contactId = String(contact.id || contact.contactId || "");
+      const context = blastThreadForContact(messages, contactId, messagePhrase);
       return {
         contact,
         contactId,
-        latest: latestMessageForContact(messages, contactId, { inboundOnly: true })
+        latest: context.latest,
+        thread: context.thread,
+        blastFound: context.blastFound
       };
     })
     .filter((item) => item.latest);
-  const replies = await mapWithConcurrency(contactsWithInboundReplies.slice(0, 50), 5, async ({ contact, contactId, latest }) => {
+  const replies = await mapWithConcurrency(contactsWithInboundReplies.slice(0, 50), 5, async ({ contact, contactId, latest, thread, blastFound }) => {
     const text = latest ? messageText(latest) : "";
-    const analysis = await classifyBlastReplyWithAi({ text, phrase: messagePhrase });
+    const analysis = await classifyBlastReplyWithAi({ text, phrase: messagePhrase, thread, isCallReply: isCallMessage(latest) });
     return {
       id: crypto.randomUUID(),
       contactId,
@@ -1445,6 +1531,8 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
       classification: analysis.classification,
       summary: analysis.summary,
       evidence: analysis.evidence || `Matched HighLevel contact tag "${replyTag}" within the selected date range.`,
+      threadMessageCount: thread.length,
+      blastContextMatched: blastFound,
       confidence: analysis.confidence,
       analysisMethod: analysis.analysisMethod,
       analysisNote: analysis.analysisNote,
@@ -1472,6 +1560,10 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     : `${fallbackClassifiedCount} reply/replies used rules fallback${openAiApiKey ? " because AI classification did not complete" : " because OpenAI is not configured"}.`;
   const fallbackReasons = [...new Set(replies.map((reply) => reply.analysisNote).filter(Boolean))];
   const fallbackReasonSummary = fallbackReasons.length ? ` Reason: ${fallbackReasons.slice(0, 2).join(" ")}` : "";
+  const blastContextMatches = replies.filter((reply) => reply.blastContextMatched).length;
+  const threadSummary = messagePhrase
+    ? `${blastContextMatches} reply thread(s) were anchored to the matching blast phrase.`
+    : "AI used bounded conversation messages in the selected date window because no blast phrase was provided.";
 
   return {
     id: crypto.randomUUID(),
@@ -1491,7 +1583,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     negativeCount: counts.Negative || 0,
     optOutCount: counts["Opt-out"] || 0,
     needsReviewCount: counts["Needs review"] || 0,
-    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${methodSummary}${fallbackReasonSummary}`,
+    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${threadSummary} ${methodSummary}${fallbackReasonSummary}`,
     source: "live",
     analysisMethod,
     replies,

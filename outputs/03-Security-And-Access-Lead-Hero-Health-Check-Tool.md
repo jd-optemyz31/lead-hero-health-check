@@ -410,7 +410,8 @@ AI classification is allowed only for Blast Analyzer reply analysis. The browser
 AI requests may include:
 
 - The selected blast message phrase or short blast context.
-- The single reply text excerpt needed for classification.
+- A bounded, capped post-blast message thread for the matching contact inside the selected date range.
+- The latest reply text excerpt needed for fallback evidence.
 
 AI requests must not include:
 
@@ -420,9 +421,11 @@ AI requests must not include:
 - `APP_ENCRYPTION_KEY`.
 - `OPENROUTER_API_KEY` or `OPENAI_API_KEY`.
 - Full client exports when a single reply excerpt is enough.
+- Full conversation history outside the selected blast window.
+- Unrelated contacts' conversations.
 - Any instruction to send a message, update a contact, add/remove tags, move an opportunity, or trigger a workflow.
 
-AI provider failures, timeouts, invalid JSON, and missing API keys should fall back to local rules. Ambiguous or low-confidence AI results should be marked `Needs review` and reviewed by a human before being included in a monthly ClickUp comment.
+AI provider failures, timeouts, invalid JSON, and missing API keys should fall back to local rules. Ambiguous, contradictory, missing-text, or call-record replies should be marked `Needs review` and reviewed by a human before being included in a monthly ClickUp comment.
 
 When OpenRouter cannot route strict structured-output parameters for a selected model, the server may retry once with a JSON-only chat request. This retry must follow the same data boundary: only the minimal reply excerpt and optional blast phrase are sent, and no HighLevel PITs, ClickUp tokens, Supabase service keys, or app secrets are included.
 

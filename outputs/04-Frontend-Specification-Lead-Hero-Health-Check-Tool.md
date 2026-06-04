@@ -454,6 +454,10 @@ Allowed labels:
 - Opt-out
 - Needs review
 
+AI should classify intent semantically rather than by a fixed phrase list. Needs review should be reserved for genuinely unclear replies, missing/contradictory text, or call-record replies where the text does not show whether the contact was positive or negative.
+
+For live HighLevel analysis, AI should use a bounded post-blast thread. When the blast phrase is matched, the result row can indicate how many post-blast messages were reviewed and that the thread was anchored to the matched blast.
+
 Frontend behavior:
 
 - AI classification should be editable by the user.
