@@ -156,8 +156,10 @@ Table columns:
 - Contact
 - Last reply date
 - Classification
+- Confidence
 - Summary
 - Evidence
+- Method
 - Review status
 
 ### Monthly Check
@@ -221,6 +223,7 @@ Main elements:
 - Users
 - Roles
 - ClickUp API connection status
+- AI classification connection status
 - HighLevel API version
 - Security settings
 
@@ -433,7 +436,10 @@ Outputs:
 
 - Classification
 - Short summary
-- Evidence message IDs
+- Evidence excerpt or evidence message IDs
+- Confidence
+- Method: AI, rules fallback, or sample
+- Review status
 
 Allowed labels:
 
@@ -447,6 +453,8 @@ Frontend behavior:
 
 - AI classification should be editable by the user.
 - Any uncertain result should be marked Needs review.
+- The Blast Analyzer results table should show Contact, Last reply date, Classification, Confidence, Summary, Evidence, Method, and Review status.
+- The Settings screen should show whether AI classification is connected without exposing the OpenAI API key.
 
 ## Empty States
 

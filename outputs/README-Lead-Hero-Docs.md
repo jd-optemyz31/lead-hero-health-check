@@ -37,6 +37,10 @@ Admins can disconnect a client from live HighLevel checks by removing the saved 
 
 Admins can edit client connection details, including timezone and automation-flow fields. Timezone should be selected from IANA timezone IDs. On edit, leaving the PIT field blank keeps the saved encrypted token; entering a new PIT replaces it.
 
+## AI Blast Analysis Decision
+
+Blast Analyzer can use OpenAI from the server only when `OPENAI_API_KEY` is configured. Results are presented as summary cards plus a reply table with classification, confidence, summary, evidence, method, and review status. If OpenAI is unavailable or uncertain, the tool uses rules fallback and marks uncertain replies as `Needs review`.
+
 ## Brand Direction
 
 The frontend specification uses the Lead Hero logo theme: gold accents, white/light working surfaces, soft silver-gray borders, and dark charcoal structure.

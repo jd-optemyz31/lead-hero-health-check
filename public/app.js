@@ -63,6 +63,8 @@ function seedStore() {
     settings: {
       highLevelApiVersion: "2021-07-28",
       clickupConnected: false,
+      aiConnected: false,
+      openAiModel: "",
       safeMode: true,
       storage: "Local",
       authRequired: false
@@ -256,6 +258,7 @@ function localBlastAnalysis(client, body) {
     needsReviewCount: 1,
     summary: "18 contacts matched the reply tag during the selected window. 9 appear positive and 1 needs human review.",
     source: "sample",
+    analysisMethod: "Sample",
     replies: [
       ["Avery Johnson", "Positive", "Contact showed interest and should be followed up."],
       ["Morgan Ellis", "Neutral", "Reply was short and unclear."],
@@ -271,6 +274,8 @@ function localBlastAnalysis(client, body) {
       classification,
       summary,
       evidence: "Local preview classification based on sample conversation evidence.",
+      confidence: classification === "Needs review" ? 0.38 : 0.74,
+      analysisMethod: "Sample",
       reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified"
     })),
     createdAt: new Date().toISOString()
@@ -419,6 +424,12 @@ function badge(value) {
 
 function sourceBadge(source) {
   return badge(source === "live" ? "Live HighLevel" : "Sample");
+}
+
+function formatConfidence(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "Not scored";
+  return `${Math.round(number * 100)}%`;
 }
 
 function errorMessage(error) {
@@ -693,8 +704,10 @@ function renderBlast() {
       <td><strong>${escapeHtml(reply.contactName)}</strong><br><span class="muted">${escapeHtml(reply.contactId)}</span></td>
       <td>${escapeHtml(reply.lastReplyDate)}</td>
       <td>${badge(reply.classification)}</td>
+      <td>${escapeHtml(formatConfidence(reply.confidence))}</td>
       <td>${escapeHtml(reply.summary)}</td>
       <td>${escapeHtml(reply.evidence)}</td>
+      <td>${escapeHtml(reply.analysisMethod || "Rules")}</td>
       <td>${escapeHtml(reply.reviewStatus)}</td>
     </tr>
   `).join("");
@@ -746,15 +759,15 @@ function renderBlastResult(analysis, rows) {
     </section>
     <section class="panel">
       <div class="panel-header">
-        <div><h2>Conversation classifications</h2><p>${escapeHtml(analysis.summary)}</p></div>
-        <div class="badge-group">${sourceBadge(analysis.source)}${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}</div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Contact</th><th>Last reply</th><th>Classification</th><th>Summary</th><th>Evidence</th><th>Status</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
+          <div><h2>Conversation classifications</h2><p>${escapeHtml(analysis.summary)}</p></div>
+          <div class="badge-group">${sourceBadge(analysis.source)}${badge(analysis.analysisMethod || "Rules")}${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}</div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Contact</th><th>Last reply</th><th>Classification</th><th>Confidence</th><th>Summary</th><th>Evidence</th><th>Method</th><th>Status</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
     </section>
   `;
 }
@@ -919,6 +932,7 @@ function renderSettings() {
         <div class="grid">
           ${metricCard("HighLevel API version", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
           ${metricCard("ClickUp connection", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "CLICKUP_API_TOKEN detected" : "Set CLICKUP_API_TOKEN for live posting")}
+          ${metricCard("AI classification", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.openAiModel || "OpenAI model"} configured server-side` : "Set OPENAI_API_KEY to classify blast replies with AI")}
           ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Supabase-backed production storage" : "Local JSON development storage")}
           ${metricCard("Authentication", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth enforced" : "Auth disabled for local development")}
           ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}

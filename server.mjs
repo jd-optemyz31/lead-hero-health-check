@@ -12,6 +12,8 @@ const storePath = path.join(dataDir, "store.json");
 const port = Number(process.env.PORT || 5173);
 const highLevelBaseUrl = process.env.HIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com";
 const defaultHighLevelApiVersion = process.env.HIGHLEVEL_API_VERSION || "2021-07-28";
+const openAiApiKey = process.env.OPENAI_API_KEY || "";
+const openAiModel = process.env.OPENAI_MODEL || "gpt-5.4-nano";
 const supabaseUrl = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -43,6 +45,8 @@ const defaultStore = {
   settings: {
     highLevelApiVersion: defaultHighLevelApiVersion,
     clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+    aiConnected: Boolean(openAiApiKey),
+    openAiModel,
     safeMode: true
   }
 };
@@ -264,6 +268,8 @@ async function readSupabaseStore() {
     settings: {
       highLevelApiVersion: defaultHighLevelApiVersion,
       clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+      aiConnected: Boolean(openAiApiKey),
+      openAiModel,
       safeMode: true,
       storage: "Supabase",
       authRequired
@@ -659,9 +665,186 @@ function classifyBlastReply(text) {
   return "Needs review";
 }
 
-function latestMessageForContact(messages, contactId) {
+const blastClassificationLabels = new Set(["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]);
+
+function normalizeBlastClassification(value) {
+  const label = String(value || "").trim();
+  return blastClassificationLabels.has(label) ? label : "Needs review";
+}
+
+function clampConfidence(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0.5;
+  return Math.max(0, Math.min(1, number));
+}
+
+function truncateForAi(text, maxLength = 2000) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  return clean.length > maxLength ? `${clean.slice(0, maxLength)}...` : clean;
+}
+
+function extractResponseText(payload) {
+  if (typeof payload?.output_text === "string") return payload.output_text;
+  const chunks = [];
+  for (const item of payload?.output || []) {
+    for (const content of item.content || []) {
+      if (typeof content.text === "string") chunks.push(content.text);
+    }
+  }
+  return chunks.join("\n").trim();
+}
+
+function parseJsonObject(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function ruleBasedBlastAnalysis(text, phrase) {
+  const classification = classifyBlastReply(text);
+  const confidenceMap = {
+    Positive: 0.62,
+    Neutral: 0.52,
+    Negative: 0.62,
+    "Opt-out": 0.82,
+    "Needs review": 0.35
+  };
+  return {
+    classification,
+    summary: text
+      ? summaryForClassification(classification, phrase)
+      : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
+    evidence: text ? sanitizeApiDetail(text) : "",
+    confidence: confidenceMap[classification] || 0.5,
+    reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified",
+    analysisMethod: openAiApiKey ? "Rules fallback" : "Rules"
+  };
+}
+
+async function classifyBlastReplyWithAi({ text, phrase }) {
+  if (!openAiApiKey || !text) return ruleBasedBlastAnalysis(text, phrase);
+
+  const fallback = ruleBasedBlastAnalysis(text, phrase);
+  const payload = {
+    model: openAiModel,
+    input: [
+      {
+        role: "system",
+        content: [
+          "You classify inbound replies to HighLevel blast campaigns for an internal Lead Hero health check.",
+          "Return only structured JSON. Do not recommend sending messages, updating contacts, changing opportunities, or triggering workflows.",
+          "Use Needs review when intent is ambiguous, context is missing, or confidence is below 0.65."
+        ].join(" ")
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          blastContext: phrase || "",
+          replyText: truncateForAi(text)
+        })
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "blast_reply_classification",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["classification", "summary", "evidence", "confidence", "reviewStatus"],
+          properties: {
+            classification: {
+              type: "string",
+              enum: ["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]
+            },
+            summary: {
+              type: "string",
+              description: "One short sentence explaining the reply intent."
+            },
+            evidence: {
+              type: "string",
+              description: "A short, non-sensitive excerpt or rationale from the reply."
+            },
+            confidence: {
+              type: "number"
+            },
+            reviewStatus: {
+              type: "string",
+              enum: ["Auto-classified", "Review needed"]
+            }
+          }
+        }
+      }
+    },
+    max_output_tokens: 250
+  };
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${openAiApiKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI classification failed with ${response.status}`);
+    }
+
+    const data = await response.json();
+    const parsed = parseJsonObject(extractResponseText(data));
+    const classification = normalizeBlastClassification(parsed?.classification);
+    const confidence = clampConfidence(parsed?.confidence);
+    const reviewStatus = classification === "Needs review" || confidence < 0.65
+      ? "Review needed"
+      : parsed?.reviewStatus === "Review needed" ? "Review needed" : "Auto-classified";
+
+    return {
+      classification: reviewStatus === "Review needed" && confidence < 0.65 ? "Needs review" : classification,
+      summary: sanitizeApiDetail(parsed?.summary || fallback.summary),
+      evidence: sanitizeApiDetail(parsed?.evidence || fallback.evidence || text),
+      confidence,
+      reviewStatus,
+      analysisMethod: "AI"
+    };
+  } catch {
+    return {
+      ...fallback,
+      reviewStatus: fallback.classification === "Needs review" ? "Review needed" : "Auto-classified (rules fallback)"
+    };
+  }
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = [];
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index;
+      index += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function latestMessageForContact(messages, contactId, { inboundOnly = false } = {}) {
   return messages
-    .filter((message) => messageContactId(message) === contactId)
+    .filter((message) => messageContactId(message) === contactId && (!inboundOnly || isInboundMessage(message)))
     .sort((a, b) => timestampOf(b) - timestampOf(a))[0];
 }
 
@@ -673,10 +856,10 @@ function countMissedCalls(messages) {
   }).length;
 }
 
-async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = "", limit = 100 }) {
+async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = "", limit = 100, createdDateFilter = true }) {
   const filters = [];
   if (replyTag) filters.push({ field: "tags", operator: "contains", value: replyTag });
-  if (dateStart && dateEnd) {
+  if (createdDateFilter && dateStart && dateEnd) {
     filters.push({
       field: "dateAdded",
       operator: "range",
@@ -700,14 +883,14 @@ async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = 
       endpointPath: "/contacts/search",
       body: baseBody
     });
-    return extractContacts(payload).filter((contact) => isWithinDateRange(contact, dateStart, dateEnd) && contactHasTag(contact, replyTag));
+    return extractContacts(payload).filter((contact) => (!createdDateFilter || isWithinDateRange(contact, dateStart, dateEnd)) && contactHasTag(contact, replyTag));
   } catch (error) {
     const payload = await highLevelRequest(client, {
       method: "POST",
       endpointPath: "/contacts/search",
       body: { locationId: client.locationId, page: 1, pageLimit: limit }
     });
-    return extractContacts(payload).filter((contact) => isWithinDateRange(contact, dateStart, dateEnd) && contactHasTag(contact, replyTag));
+    return extractContacts(payload).filter((contact) => (!createdDateFilter || isWithinDateRange(contact, dateStart, dateEnd)) && contactHasTag(contact, replyTag));
   }
 }
 
@@ -1022,6 +1205,8 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
     classification,
     summary: summaryForClassification(classification, messagePhrase),
     evidence: evidenceForClassification(classification),
+    confidence: classification === "Needs review" ? 0.38 : 0.74,
+    analysisMethod: "Sample",
     reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified"
   }));
 
@@ -1045,33 +1230,43 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
     needsReviewCount: needsReview,
     summary: `${total} contacts matched the reply tag during the selected window. ${positive} appear positive and ${needsReview} need human review.`,
     source: "sample",
+    analysisMethod: "Sample",
     replies,
     createdAt: new Date().toISOString()
   };
 }
 
 async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase }) {
-  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag, limit: 100 });
+  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag, limit: 100, createdDateFilter: false });
   const messages = await highLevelExportMessages(client, { dateStart, dateEnd });
   const contactIds = new Set(contacts.map((contact) => String(contact.id || contact.contactId || "")));
-  const replies = contacts.slice(0, 50).map((contact) => {
-    const contactId = String(contact.id || contact.contactId || "");
-    const latest = latestMessageForContact(messages, contactId);
+  const contactsWithInboundReplies = contacts
+    .map((contact) => {
+      const contactId = String(contact.id || contact.contactId || "");
+      return {
+        contact,
+        contactId,
+        latest: latestMessageForContact(messages, contactId, { inboundOnly: true })
+      };
+    })
+    .filter((item) => item.latest);
+  const replies = await mapWithConcurrency(contactsWithInboundReplies.slice(0, 50), 5, async ({ contact, contactId, latest }) => {
     const text = latest ? messageText(latest) : "";
-    const classification = classifyBlastReply(text);
+    const analysis = await classifyBlastReplyWithAi({ text, phrase: messagePhrase });
     return {
       id: crypto.randomUUID(),
       contactId,
       contactName: contactName(contact),
       lastReplyDate: latest?.dateAdded || latest?.createdAt || dateEnd,
-      classification,
-      summary: text
-        ? summaryForClassification(classification, messagePhrase)
-        : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
-      evidence: text ? sanitizeApiDetail(text) : `Matched HighLevel contact tag "${replyTag}" within the selected date range.`,
-      reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified"
+      classification: analysis.classification,
+      summary: analysis.summary,
+      evidence: analysis.evidence || `Matched HighLevel contact tag "${replyTag}" within the selected date range.`,
+      confidence: analysis.confidence,
+      analysisMethod: analysis.analysisMethod,
+      reviewStatus: analysis.reviewStatus
     };
   });
+  const taggedWithoutMessageCount = Math.max(0, contacts.length - contactsWithInboundReplies.length);
 
   const phraseMatches = messages.filter((message) => {
     if (!messagePhrase) return false;
@@ -1095,14 +1290,15 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     messageType: "SMS",
     estimatedSends: "Not available",
     deliveryRate: "Not available",
-    totalRepliedContacts: contacts.length,
+    totalRepliedContacts: contactsWithInboundReplies.length,
     positiveCount: counts.Positive || 0,
     neutralCount: counts.Neutral || 0,
     negativeCount: counts.Negative || 0,
     optOutCount: counts["Opt-out"] || 0,
     needsReviewCount: counts["Needs review"] || 0,
-    summary: `${contacts.length} HighLevel contacts matched the reply tag during the selected window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag.`,
+    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${openAiApiKey ? "AI classification was used where reply text was available." : "Rule-based classification was used because OpenAI is not configured."}`,
     source: "live",
+    analysisMethod: openAiApiKey ? "AI-assisted" : "Rules",
     replies,
     createdAt: new Date().toISOString()
   };
@@ -1418,6 +1614,8 @@ async function handleApi(req, res, pathname) {
         settings: {
           highLevelApiVersion: defaultHighLevelApiVersion,
           clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+          aiConnected: Boolean(openAiApiKey),
+          openAiModel,
           safeMode: true,
           storage: supabaseConfigured ? "Supabase" : "Local",
           authRequired
@@ -1432,6 +1630,8 @@ async function handleApi(req, res, pathname) {
       settings: {
         ...store.settings,
         clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+        aiConnected: Boolean(openAiApiKey),
+        openAiModel,
         storage: supabaseConfigured ? "Supabase" : "Local",
         authRequired
       },

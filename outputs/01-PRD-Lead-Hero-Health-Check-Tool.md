@@ -116,7 +116,11 @@ Outputs:
 - Opt-outs
 - Needs review
 - Conversation summaries
-- Recommended follow-up
+- Confidence score
+- Analysis method: AI, rules fallback, or sample
+- Review status
+
+AI classification is used only to summarize and categorize reply intent. It must not send messages, update HighLevel records, add tags, move opportunities, or trigger workflows. Low-confidence or ambiguous replies should be marked `Needs review`.
 
 ### ClickUp Posting
 
@@ -281,9 +285,11 @@ Next Month Focus:
 4. User enters reply tag, such as `Replied to Blast`.
 5. User optionally selects workflow name/ID or message phrase.
 6. Tool finds matching contacts and conversations.
-7. Tool classifies replies.
+7. Tool classifies replies with AI when `OPENAI_API_KEY` is configured, otherwise it uses the built-in rules fallback.
 8. User saves the blast analysis.
 9. Saved blast analysis can later be attached to a monthly report.
+
+For live HighLevel checks, the reply tag identifies the candidate contacts, but the selected date range should apply to inbound conversation messages. Older contacts who reply during the selected blast window should still be included.
 
 ## MVP Scope
 

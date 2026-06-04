@@ -85,6 +85,16 @@ OpenAI API or another approved LLM provider.
 
 Used only for analyzing conversation replies, not for sending messages.
 
+Current MVP implementation:
+
+- The Node server calls the OpenAI Responses API from the backend only.
+- `OPENAI_API_KEY` and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
+- The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus`.
+- The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
+- Only the minimal reply text needed for classification and optional blast context should be sent to the AI service; HighLevel PITs, ClickUp tokens, Supabase keys, and full account exports must never be sent.
+- If OpenAI is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier and marks the method as `Rules` or `Rules fallback`.
+- The default OpenAI model is `gpt-5.4-nano`, chosen for high-volume classification and extraction-style work. Use the OpenAI API model ID directly; do not include provider prefixes such as `openai/`.
+
 ### Hosting
 
 Vercel for the web app.
@@ -347,6 +357,9 @@ Fields:
 - classification
 - summary
 - evidence_message_ids
+- confidence
+- analysis_method
+- review_status
 - created_at
 
 Classifications:
@@ -480,8 +493,11 @@ Responsibilities:
 - Search contacts by reply tag and date range where supported
 - Pull conversations for matching contacts
 - Identify relevant replies
-- Classify replies with AI
+- Classify replies with AI when configured, with a local rules fallback
+- Store classification, confidence, evidence, method, and review status
 - Save analysis results
+
+For live blast analysis, do not use contact creation date as the primary date filter. Search candidate contacts by the configured reply tag, then apply `dateStart` and `dateEnd` to inbound conversation messages so older contacts who replied during the blast window are included.
 
 ### clickupPostingService
 
@@ -498,6 +514,7 @@ DATABASE_URL=
 APP_ENCRYPTION_KEY=
 CLICKUP_API_TOKEN=
 OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5.4-nano
 HIGHLEVEL_API_VERSION=2021-07-28
 SUPABASE_URL=
 SUPABASE_ANON_KEY=
