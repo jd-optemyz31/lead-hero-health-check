@@ -692,6 +692,14 @@ function contactHasTag(contact, tag) {
   return contactTags(contact).some((item) => item.toLowerCase() === needle || item.toLowerCase().includes(needle));
 }
 
+function filterSearchedContacts(contacts, { dateStart, dateEnd, replyTag = "", createdDateFilter = true, trustServerTagFilter = false }) {
+  return contacts.filter((contact) => {
+    const matchesDate = !createdDateFilter || isWithinDateRange(contact, dateStart, dateEnd);
+    const matchesTag = trustServerTagFilter || contactHasTag(contact, replyTag);
+    return matchesDate && matchesTag;
+  });
+}
+
 function hasAttribution(contact) {
   const direct = ["source", "attributionSource", "utmSource", "utm_source", "firstAttribution", "lastAttribution"];
   if (direct.some((key) => Boolean(contact[key]))) return true;
@@ -1204,15 +1212,31 @@ async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = 
       endpointPath: "/contacts/search",
       body: baseBody
     });
-    return extractContacts(payload).filter((contact) => (!createdDateFilter || isWithinDateRange(contact, dateStart, dateEnd)) && contactHasTag(contact, replyTag));
-  } catch (error) {
-    const payload = await highLevelRequest(client, {
-      method: "POST",
-      endpointPath: "/contacts/search",
-      body: { locationId: client.locationId, page: 1, pageLimit: limit }
+    const filteredContacts = filterSearchedContacts(extractContacts(payload), {
+      dateStart,
+      dateEnd,
+      replyTag,
+      createdDateFilter,
+      trustServerTagFilter: Boolean(replyTag)
     });
-    return extractContacts(payload).filter((contact) => (!createdDateFilter || isWithinDateRange(contact, dateStart, dateEnd)) && contactHasTag(contact, replyTag));
+    if (filteredContacts.length || !replyTag) return filteredContacts;
+  } catch (error) {
+    // Fall through to the unfiltered search below. Some HighLevel tag filters can fail
+    // or return no rows depending on account response shape.
   }
+
+  const payload = await highLevelRequest(client, {
+    method: "POST",
+    endpointPath: "/contacts/search",
+    body: { locationId: client.locationId, page: 1, pageLimit: limit }
+  });
+  return filterSearchedContacts(extractContacts(payload), {
+    dateStart,
+    dateEnd,
+    replyTag,
+    createdDateFilter,
+    trustServerTagFilter: false
+  });
 }
 
 async function highLevelSearchOpportunities(client, { contactIdValue = "", dateStart, dateEnd, limit = 100 }) {

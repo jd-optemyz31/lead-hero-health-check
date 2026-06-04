@@ -506,6 +506,8 @@ Responsibilities:
 
 For live blast analysis, do not use contact creation date as the primary date filter. Search candidate contacts by the configured reply tag, then apply `dateStart` and `dateEnd` to inbound conversation messages so older contacts who replied during the blast window are included.
 
+When the server uses HighLevel contact search with a reply-tag filter, it should trust the server-side tag match if HighLevel returns contact rows without tag details. If the tag-filtered search returns no rows or fails, the server may retry a read-only unfiltered contact search and apply local tag matching only when tag metadata is present in the returned contacts.
+
 ### clickupPostingService
 
 Responsibilities:
