@@ -221,6 +221,23 @@ Notes:
 - `ghl_private_integration_token_encrypted` is server-only and must never be sent to the browser.
 - The browser may receive `hasToken` and a short non-sensitive preview only.
 - Token replacement should be logged in `api_audit_logs` without logging the token value.
+- Disconnecting a client clears `ghl_private_integration_token_encrypted` and `ghl_private_integration_token_preview` in the app database. It does not call HighLevel and does not revoke the token inside HighLevel.
+
+### Client Connection API
+
+Admin-only routes:
+
+```text
+POST /api/clients
+POST /api/clients/disconnect
+POST /api/highlevel/test
+```
+
+`POST /api/clients/disconnect` removes the stored HighLevel token from this tool so future live HighLevel reads are disabled for that client until a new token is saved. It must not call a HighLevel revoke, delete, or account-management endpoint.
+
+`POST /api/clients` also handles edits when an existing client ID is provided. Editable fields include client name, timezone, HighLevel location ID, ClickUp task ID, form lead tag, active pipeline name/ID, first-reply stage name/ID, and reply movement window. The PIT token is required only when creating a new client or replacing a disconnected token. On edit, a blank PIT preserves the existing encrypted token.
+
+The frontend should use a timezone selector backed by IANA timezone IDs. Browsers that support `Intl.supportedValuesOf("timeZone")` can provide the full list without hardcoding it.
 
 ### routing_setups
 

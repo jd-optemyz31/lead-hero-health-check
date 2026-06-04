@@ -57,6 +57,8 @@ Main elements:
 - Add Client button
 - Search input
 - Status indicator for connected/missing setup
+- Admin-only Edit action for client connection details
+- Admin-only Disconnect action for saved HighLevel connection
 - Client detail drawer or page
 
 Fields:
@@ -71,11 +73,28 @@ Fields:
 - First reply stage name or ID
 - Reply movement window
 
+Timezone should be a dropdown selector using IANA timezone IDs, not a free-text field. Use the browser-supported timezone list where available.
+
 Safety text near token field:
 
 ```text
 Use a read-only HighLevel Private Integration Token.
 ```
+
+Disconnect behavior:
+
+- Show Disconnect only for admins and only when a token is saved.
+- Require confirmation before disconnecting.
+- Confirmation copy should explain that the action removes the saved token from the Health Check Tool only.
+- Do not imply that the HighLevel account, contacts, opportunities, workflows, or token inside HighLevel will be changed.
+- After disconnecting, show the client as missing a HighLevel token and disable live connection tests.
+
+Edit behavior:
+
+- Show Edit only for admins.
+- Pre-fill all editable fields except the plaintext PIT.
+- On edit, the PIT field should be optional and should say that leaving it blank keeps the saved token.
+- Saving client metadata should not call HighLevel.
 
 ### Routing Setup
 
@@ -381,6 +400,7 @@ Frontend behavior:
 - User should never see raw PIT token after saving.
 - HighLevel errors should be translated into clear setup messages.
 - No screen should include a Send, Message, Call, Enroll, Add Tag, or Update Contact action.
+- Disconnecting a client should clear this tool's saved token only; it should not call any HighLevel endpoint.
 
 ### ClickUp
 
@@ -466,6 +486,7 @@ Long-running checks should show step progress:
 - Client name is required.
 - HighLevel location ID is required.
 - HighLevel PIT token is required.
+- HighLevel PIT token is required when adding a new client, but optional when editing an existing client with a saved token.
 - ClickUp task ID is required before posting.
 - Blast Analyzer requires client, date range, and reply tag.
 - Monthly Check requires client and date range.

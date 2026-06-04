@@ -29,6 +29,14 @@ The tool must not send outbound communication or modify account contacts inside 
 
 The tool must not create or update opportunities, tags, contacts, workflows, or messages.
 
+## Client Disconnect Decision
+
+Admins can disconnect a client from live HighLevel checks by removing the saved HighLevel Private Integration Token from this tool. This does not call HighLevel and does not change the client's HighLevel account.
+
+## Client Edit Decision
+
+Admins can edit client connection details, including timezone and automation-flow fields. Timezone should be selected from IANA timezone IDs. On edit, leaving the PIT field blank keeps the saved encrypted token; entering a new PIT replaces it.
+
 ## Brand Direction
 
 The frontend specification uses the Lead Hero logo theme: gold accents, white/light working surfaces, soft silver-gray borders, and dark charcoal structure.

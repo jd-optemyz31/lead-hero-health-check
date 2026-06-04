@@ -59,6 +59,10 @@ Store each client setup:
 - Active pipeline name or ID
 - Expected first-reply stage name or ID
 
+Admins can disconnect a client's HighLevel account from the tool. Disconnecting removes the saved HighLevel Private Integration Token from the Health Check Tool only. It does not change, revoke, or delete anything inside HighLevel.
+
+Admins can edit all client connection details after setup, including timezone, location ID, ClickUp task ID, form lead tag, active pipeline, and first-reply stage. When editing an existing client, the Private Integration Token field is optional; leaving it blank keeps the saved encrypted token, and entering a new token replaces it.
+
 ### Routing Setup
 
 **Priority:** Must-have
@@ -239,6 +243,24 @@ Next Month Focus:
 3. User adds a client with HighLevel location ID, read-only PIT token, ClickUp task ID, and timezone.
 4. User goes to Routing Setup.
 5. User adds staff notification contact details and confirms the expected phrase `New form submission`.
+
+### Disconnecting A Client
+
+1. Admin opens Clients.
+2. Admin chooses Disconnect for the client.
+3. Tool asks for confirmation.
+4. Tool removes the encrypted HighLevel token and token preview from its own storage.
+5. Client setup, routing setup, reports, and ClickUp task ID remain saved.
+6. Live HighLevel checks are disabled until a new read-only PIT is saved.
+
+### Editing Client Connection Details
+
+1. Admin opens Clients.
+2. Admin chooses Edit for the client.
+3. Tool pre-fills all editable setup fields.
+4. Admin updates timezone, location ID, ClickUp task ID, automation-flow fields, or other client metadata.
+5. Admin leaves the PIT field blank to keep the saved token, or enters a new read-only PIT to replace it.
+6. Tool saves the updated settings without calling or modifying HighLevel.
 
 ### Running A Monthly Check
 

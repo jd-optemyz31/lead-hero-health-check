@@ -408,6 +408,17 @@ textarea:focus {
   background: var(--surface-subtle);
 }
 
+.btn.danger {
+  background: #fff;
+  color: var(--danger);
+  border-color: rgba(220, 38, 38, 0.32);
+}
+
+.btn.danger:hover {
+  background: #fef2f2;
+  border-color: rgba(220, 38, 38, 0.58);
+}
+
 .btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -418,6 +429,13 @@ textarea:focus {
   padding: 5px 9px;
   font-size: 12px;
   line-height: 18px;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .table-wrap {

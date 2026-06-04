@@ -28,11 +28,31 @@ const state = {
   settings: {},
   auth: { required: false, user: null },
   selectedReportId: "",
+  editingClientId: "",
   toast: ""
 };
 
 const app = document.querySelector("#app");
 const localStoreKey = "leadHeroHealthCheckStore";
+const fallbackTimeZones = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Phoenix",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+  "America/Toronto",
+  "America/Vancouver",
+  "Europe/London",
+  "Europe/Paris",
+  "Asia/Dubai",
+  "Asia/Karachi",
+  "Asia/Kolkata",
+  "Asia/Singapore",
+  "Australia/Sydney"
+];
 
 function seedStore() {
   return {
@@ -117,7 +137,8 @@ function localApi(path, options = {}, originalError) {
   if (method === "GET" && path === "/api/bootstrap") return store;
 
   if (method === "POST" && path === "/api/clients") {
-    if (!body.pitToken) throw new Error("A read-only HighLevel Private Integration Token is required when adding a client.");
+    const existing = body.id ? store.clients.find((item) => item.id === body.id) : null;
+    if (!existing && !body.pitToken) throw new Error("A read-only HighLevel Private Integration Token is required when adding a client.");
     const client = {
       id: body.id || crypto.randomUUID(),
       name: body.name,
@@ -130,14 +151,30 @@ function localApi(path, options = {}, originalError) {
       replyStageName: body.replyStageName || "",
       replyStageId: body.replyStageId || "",
       replyStageWindowHours: Number(body.replyStageWindowHours || 24),
-      tokenPreview: body.pitToken ? `${body.pitToken.slice(0, 4)}...${body.pitToken.slice(-4)}` : "local",
-      hasToken: Boolean(body.pitToken),
-      createdAt: now,
+      tokenPreview: body.pitToken ? `${body.pitToken.slice(0, 4)}...${body.pitToken.slice(-4)}` : existing?.tokenPreview || "",
+      hasToken: body.pitToken ? true : Boolean(existing?.hasToken),
+      createdAt: existing?.createdAt || now,
       updatedAt: now
     };
-    store.clients.push(client);
+    const index = store.clients.findIndex((item) => item.id === client.id);
+    if (index >= 0) store.clients[index] = { ...store.clients[index], ...client };
+    else store.clients.push(client);
     writeLocalStore(store);
     return { client, clients: store.clients };
+  }
+
+  if (method === "POST" && path === "/api/clients/disconnect") {
+    const client = store.clients.find((item) => item.id === body.clientId);
+    if (!client) throw new Error("Client not found.");
+    client.tokenPreview = "";
+    client.hasToken = false;
+    client.updatedAt = now;
+    writeLocalStore(store);
+    return {
+      message: "Client HighLevel connection disconnected from this tool.",
+      client,
+      clients: store.clients
+    };
   }
 
   if (method === "POST" && path === "/api/routing") {
@@ -339,6 +376,23 @@ function currentClientId() {
   return state.clients[0]?.id || "";
 }
 
+function isAdminUser() {
+  return state.auth?.user?.role === "admin";
+}
+
+function timeZones() {
+  if (typeof Intl?.supportedValuesOf === "function") {
+    return Intl.supportedValuesOf("timeZone");
+  }
+  return fallbackTimeZones;
+}
+
+function timezoneOptions(selected = "America/New_York") {
+  const zones = timeZones();
+  const values = zones.includes(selected) ? zones : [selected, ...zones];
+  return values.map((zone) => `<option value="${escapeHtml(zone)}" ${zone === selected ? "selected" : ""}>${escapeHtml(zone)}</option>`).join("");
+}
+
 function clientOptions(selected = currentClientId()) {
   return state.clients.map((client) => `<option value="${client.id}" ${client.id === selected ? "selected" : ""}>${escapeHtml(client.name)}</option>`).join("");
 }
@@ -460,6 +514,12 @@ function renderLogin() {
 }
 
 function renderClients() {
+  const canManageConnections = isAdminUser();
+  const editingClient = state.clients.find((client) => client.id === state.editingClientId);
+  const formTitle = editingClient ? `Edit ${editingClient.name}` : "Add client";
+  const formSubtitle = editingClient
+    ? "Update connection details and account flow settings. Leave the token blank to keep the saved token."
+    : "Store the read-only HighLevel connection and ClickUp task target.";
   const rows = state.clients.map((client) => `
     <tr>
       <td><strong>${escapeHtml(client.name)}</strong><br><span class="muted">${escapeHtml(client.timezone)}</span></td>
@@ -468,7 +528,13 @@ function renderClients() {
       <td>${client.hasToken ? badge("Token saved") : badge("Missing token")}</td>
       <td>${client.clickupTaskId ? escapeHtml(client.clickupTaskId) : badge("Missing ClickUp")}</td>
       <td>${new Date(client.updatedAt).toLocaleDateString()}</td>
-      <td><button class="btn secondary small" type="button" data-test-highlevel="${client.id}" ${client.hasToken ? "" : "disabled"}>${icons.play} Test</button></td>
+      <td>
+        <div class="table-actions">
+          ${canManageConnections ? `<button class="btn secondary small" type="button" data-edit-client="${client.id}">Edit</button>` : ""}
+          ${canManageConnections ? `<button class="btn secondary small" type="button" data-test-highlevel="${client.id}" ${client.hasToken ? "" : "disabled"}>${icons.play} Test</button>` : ""}
+          ${canManageConnections ? `<button class="btn danger small" type="button" data-disconnect-client="${client.id}" ${client.hasToken ? "" : "disabled"}>Disconnect</button>` : ""}
+        </div>
+      </td>
     </tr>
   `).join("");
 
@@ -476,25 +542,26 @@ function renderClients() {
     <div class="grid two">
       <section class="panel">
         <div class="panel-header">
-          <div><h2>Add or update client</h2><p>Store the read-only HighLevel connection and ClickUp task target.</p></div>
+          <div><h2>${escapeHtml(formTitle)}</h2><p>${escapeHtml(formSubtitle)}</p></div>
         </div>
         <form id="client-form" class="grid">
+          <input type="hidden" name="id" value="${escapeHtml(editingClient?.id || "")}">
           <div class="form-grid">
-            <div class="field"><label>Client name</label><input name="name" required placeholder="Client account name"></div>
-            <div class="field"><label>Timezone</label><input name="timezone" value="America/New_York"></div>
-            <div class="field"><label>HighLevel location ID</label><input name="locationId" required placeholder="Location/sub-account ID"></div>
-            <div class="field"><label>ClickUp task ID</label><input name="clickupTaskId" placeholder="ClickUp client task ID"></div>
-            <div class="field"><label>Read-only Private Integration Token</label><input name="pitToken" type="password" required placeholder="Encrypted server-side after saving"></div>
-            <div class="field"><label>Form lead tag</label><input name="formLeadTag" value="form lead"></div>
-            <div class="field"><label>Active pipeline name</label><input name="activePipelineName" placeholder="#1 Active Pipeline"></div>
-            <div class="field"><label>Active pipeline ID</label><input name="activePipelineId" placeholder="Optional exact pipeline ID"></div>
-            <div class="field"><label>First reply stage name</label><input name="replyStageName" placeholder="Replied / Engaged / Needs Follow Up"></div>
-            <div class="field"><label>First reply stage ID</label><input name="replyStageId" placeholder="Optional exact stage ID"></div>
-            <div class="field"><label>Reply movement window</label><input name="replyStageWindowHours" type="number" min="1" value="24"></div>
+            <div class="field"><label>Client name</label><input name="name" required placeholder="Client account name" value="${escapeHtml(editingClient?.name || "")}"></div>
+            <div class="field"><label>Timezone</label><select name="timezone">${timezoneOptions(editingClient?.timezone || "America/New_York")}</select></div>
+            <div class="field"><label>HighLevel location ID</label><input name="locationId" required placeholder="Location/sub-account ID" value="${escapeHtml(editingClient?.locationId || "")}"></div>
+            <div class="field"><label>ClickUp task ID</label><input name="clickupTaskId" placeholder="ClickUp client task ID" value="${escapeHtml(editingClient?.clickupTaskId || "")}"></div>
+            <div class="field"><label>Read-only Private Integration Token</label><input name="pitToken" type="password" ${editingClient ? "" : "required"} placeholder="${editingClient ? "Leave blank to keep saved token" : "Encrypted server-side after saving"}"></div>
+            <div class="field"><label>Form lead tag</label><input name="formLeadTag" value="${escapeHtml(editingClient?.formLeadTag || "form lead")}"></div>
+            <div class="field"><label>Active pipeline name</label><input name="activePipelineName" placeholder="#1 Active Pipeline" value="${escapeHtml(editingClient?.activePipelineName || "")}"></div>
+            <div class="field"><label>Active pipeline ID</label><input name="activePipelineId" placeholder="Optional exact pipeline ID" value="${escapeHtml(editingClient?.activePipelineId || "")}"></div>
+            <div class="field"><label>First reply stage name</label><input name="replyStageName" placeholder="Replied / Engaged / Needs Follow Up" value="${escapeHtml(editingClient?.replyStageName || "")}"></div>
+            <div class="field"><label>First reply stage ID</label><input name="replyStageId" placeholder="Optional exact stage ID" value="${escapeHtml(editingClient?.replyStageId || "")}"></div>
+            <div class="field"><label>Reply movement window</label><input name="replyStageWindowHours" type="number" min="1" value="${escapeHtml(editingClient?.replyStageWindowHours || 24)}"></div>
           </div>
           <p class="muted">Automation firing is checked with read-only evidence: form-lead contacts, opportunities in the active pipeline, staff notification messages, and reply-stage movement after the contact replies.</p>
           <p class="muted">Use read-only HighLevel scopes only. Tokens are never shown again after saving and must not be stored in code or Railway variables per client.</p>
-          <div class="actions"><button class="btn primary" type="submit">${icons.save} Save client</button></div>
+          <div class="actions"><button class="btn primary" type="submit">${icons.save} ${editingClient ? "Save changes" : "Save client"}</button>${editingClient ? `<button class="btn secondary" type="button" data-cancel-edit>Cancel edit</button>` : ""}</div>
         </form>
       </section>
       <section class="panel">
@@ -517,16 +584,42 @@ function renderClients() {
     try {
       const payload = await api("/api/clients", { method: "POST", body: JSON.stringify(body) });
       state.clients = payload.clients;
-      showToast("Client saved.");
+      state.editingClientId = "";
+      showToast(body.id ? "Client details updated." : "Client saved.");
     } catch (error) {
       showToast(errorMessage(error));
     }
+  });
+  document.querySelectorAll("[data-edit-client]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingClientId = button.dataset.editClient;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-cancel-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingClientId = "";
+      render();
+    });
   });
   document.querySelectorAll("[data-test-highlevel]").forEach((button) => {
     button.addEventListener("click", async () => {
       try {
         const payload = await api("/api/highlevel/test", { method: "POST", body: JSON.stringify({ clientId: button.dataset.testHighlevel }) });
         showToast(payload.message || "HighLevel connection succeeded.");
+      } catch (error) {
+        showToast(errorMessage(error));
+      }
+    });
+  });
+  document.querySelectorAll("[data-disconnect-client]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const client = state.clients.find((item) => item.id === button.dataset.disconnectClient);
+      if (!window.confirm(`Disconnect ${client?.name || "this client"} from HighLevel in this tool? This only removes the saved token from the Health Check Tool.`)) return;
+      try {
+        const payload = await api("/api/clients/disconnect", { method: "POST", body: JSON.stringify({ clientId: button.dataset.disconnectClient }) });
+        state.clients = payload.clients;
+        showToast(payload.message || "Client disconnected.");
       } catch (error) {
         showToast(errorMessage(error));
       }

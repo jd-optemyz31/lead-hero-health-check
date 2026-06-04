@@ -1466,7 +1466,7 @@ async function handleApi(req, res, pathname) {
       replyStageWindowHours: Number(body.replyStageWindowHours || existing?.replyStageWindowHours || 24),
       tokenPreview: body.pitToken ? tokenPreview(body.pitToken) : existing?.tokenPreview || "",
       tokenCiphertext: body.pitToken ? encryptToken(body.pitToken) : existing?.tokenCiphertext || "",
-      createdAt: body.createdAt || now,
+      createdAt: existing?.createdAt || body.createdAt || now,
       updatedAt: now
     };
     const index = store.clients.findIndex((item) => item.id === client.id);
@@ -1474,6 +1474,23 @@ async function handleApi(req, res, pathname) {
     else store.clients.push(client);
     await writeStore(store);
     return json(res, 200, { client: publicClient(client), clients: store.clients.map(publicClient) });
+  }
+
+  if (req.method === "POST" && pathname === "/api/clients/disconnect") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can disconnect client HighLevel accounts.");
+    const body = await parseBody(req);
+    const client = store.clients.find((item) => item.id === body.clientId);
+    if (!client) return json(res, 404, { error: "Client not found." });
+
+    client.tokenPreview = "";
+    client.tokenCiphertext = "";
+    client.updatedAt = new Date().toISOString();
+    await writeStore(store);
+    return json(res, 200, {
+      message: "Client HighLevel connection disconnected from this tool.",
+      client: publicClient(client),
+      clients: store.clients.map(publicClient)
+    });
   }
 
   if (req.method === "POST" && pathname === "/api/highlevel/test") {

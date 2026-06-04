@@ -41,6 +41,7 @@ Can:
 - Manage users
 - Add/edit clients
 - Add/edit HighLevel PIT tokens
+- Disconnect client HighLevel tokens from this tool
 - Add/edit ClickUp task IDs
 - Configure routing setup
 - Run monthly checks
@@ -372,6 +373,22 @@ Recommended production storage:
 - Return only `hasToken` and a short token preview to the browser.
 - Log token create/replace/remove events without logging the token value.
 
+Edit behavior:
+
+- Admins may edit client connection details such as timezone, location ID, ClickUp task ID, and automation-flow settings.
+- When editing an existing client, leaving the PIT field blank must preserve the existing encrypted token.
+- Entering a new PIT replaces the saved encrypted token.
+- The frontend must never pre-fill, reveal, or return the existing plaintext PIT.
+- Editing client metadata must not call HighLevel or modify the client's HighLevel account.
+
+Disconnect behavior:
+
+- Admins may disconnect a client from HighLevel inside this tool.
+- Disconnecting must only clear the encrypted PIT and token preview from the app database.
+- Disconnecting must not call HighLevel, revoke tokens through HighLevel, delete contacts, update account settings, or change any client CRM data.
+- Existing reports, routing setup, ClickUp task IDs, and client metadata should remain available.
+- After disconnecting, live HighLevel checks should be disabled until a new read-only PIT is saved.
+
 ### ClickUp API Token
 
 The ClickUp token should be stored as an environment variable or encrypted secret.
@@ -535,6 +552,7 @@ The app should log:
 
 - User login
 - Client created/updated
+- Client HighLevel connection disconnected
 - Routing setup changed
 - Monthly check generated
 - Blast analysis generated
