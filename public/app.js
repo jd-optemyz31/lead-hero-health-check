@@ -27,6 +27,7 @@ const state = {
   auth: { required: false, user: null },
   selectedReportId: "",
   editingClientId: "",
+  editingRoutingId: "",
   activeBlastAnalysisId: "",
   activeBlastAnalysis: null,
   blastResultsCleared: false,
@@ -182,18 +183,21 @@ function localApi(path, options = {}, originalError) {
   }
 
   if (method === "POST" && path === "/api/routing") {
+    const existing = body.id ? store.routingSetups.find((item) => item.id === body.id) : null;
     const setup = {
-      id: crypto.randomUUID(),
+      id: body.id || crypto.randomUUID(),
       clientId: body.clientId,
       staffContactId: body.staffContactId || "",
       staffPhone: body.staffPhone,
       expectedPhrase: body.expectedPhrase || "New form submission",
       expectedDelayMinutes: Number(body.expectedDelayMinutes || 10),
       active: true,
-      createdAt: now,
+      createdAt: existing?.createdAt || now,
       updatedAt: now
     };
-    store.routingSetups.push(setup);
+    const index = store.routingSetups.findIndex((item) => item.id === setup.id);
+    if (index >= 0) store.routingSetups[index] = { ...store.routingSetups[index], ...setup };
+    else store.routingSetups.push(setup);
     writeLocalStore(store);
     return { routingSetups: store.routingSetups };
   }
@@ -557,7 +561,8 @@ function renderLogin() {
 function renderClients() {
   const canManageConnections = isAdminUser();
   const editingClient = state.clients.find((client) => client.id === state.editingClientId);
-  const routingClientId = editingClient?.id || currentClientId();
+  const editingRouting = state.routingSetups.find((setup) => setup.id === state.editingRoutingId);
+  const routingClientId = editingRouting?.clientId || editingClient?.id || currentClientId();
   const routingRows = state.routingSetups
     .filter((setup) => !routingClientId || setup.clientId === routingClientId)
     .map((setup) => {
@@ -570,6 +575,7 @@ function renderClients() {
           <td>${escapeHtml(setup.expectedPhrase)}</td>
           <td>${setup.expectedDelayMinutes} min</td>
           <td>${setup.active ? badge("Active") : badge("Inactive")}</td>
+          <td>${canManageConnections ? `<button class="btn secondary small" type="button" data-edit-routing="${setup.id}">Edit</button>` : ""}</td>
         </tr>
       `;
     }).join("");
@@ -577,6 +583,23 @@ function renderClients() {
   const formSubtitle = editingClient
     ? "Update connection, lead flow, routing, and ClickUp settings. Leave the token blank to keep the saved token."
     : "Store the read-only HighLevel connection, lead flow, routing, and ClickUp task target.";
+  const routingFormTitle = editingRouting ? "Edit routing setup" : "Add routing setup";
+  const statusItems = [
+    {
+      label: "HighLevel",
+      detail: `Read-only mode, API ${state.settings.highLevelApiVersion || "2021-07-28"}`
+    },
+    {
+      label: "ClickUp",
+      detail: state.settings.clickupConnected ? "Connected for reviewed report comments" : "Local preview only"
+    },
+    {
+      label: "AI",
+      detail: state.settings.aiConnected
+        ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} connected${state.settings.openAiModel ? `, ${state.settings.openAiModel}` : ""}`
+        : "Rules fallback"
+    }
+  ];
   const rows = state.clients.map((client) => `
     <tr>
       <td><strong>${escapeHtml(client.name)}</strong><br><span class="muted">${escapeHtml(client.timezone)}</span></td>
@@ -610,19 +633,6 @@ function renderClients() {
       </section>
       <section class="panel">
         <div class="panel-header">
-          <div><h2>System status</h2><p>Read-only integration state from server-side configuration.</p></div>
-        </div>
-        <div class="grid six">
-          ${metricCard("HighLevel API", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
-          ${metricCard("ClickUp", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "Comment posting enabled" : "Set CLICKUP_API_TOKEN for live posting")}
-          ${metricCard("AI", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} / ${state.settings.openAiModel || "model"}` : "Set AI key for blast classification")}
-          ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Production storage" : "Local development storage")}
-          ${metricCard("Auth", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth" : "Auth disabled locally")}
-          ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
           <div><h2>${escapeHtml(formTitle)}</h2><p>${escapeHtml(formSubtitle)}</p></div>
         </div>
         <form id="client-form" class="grid">
@@ -651,24 +661,33 @@ function renderClients() {
       </section>
       <section class="panel">
         <div class="panel-header">
-          <div><h2>Routing</h2><p>Configure staff notification evidence for the selected client. This only checks messages containing the expected phrase.</p></div>
+          <div><h2>${routingFormTitle}</h2><p>Configure staff notification evidence for the selected client. This only checks messages containing the expected phrase.</p></div>
         </div>
         <form id="routing-form" class="grid">
+          <input type="hidden" name="id" value="${escapeHtml(editingRouting?.id || "")}">
           <div class="form-grid">
             <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions(routingClientId)}</select></div>
-            <div class="field"><label>Staff contact ID</label><input name="staffContactId" placeholder="Optional if phone is enough"></div>
-            <div class="field"><label>Staff phone number</label><input name="staffPhone" required placeholder="+1 555 010 1400"></div>
-            <div class="field"><label>Expected phrase</label><input name="expectedPhrase" value="New form submission"></div>
-            <div class="field"><label>Expected delay window</label><select name="expectedDelayMinutes"><option value="5">5 minutes</option><option value="10" selected>10 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option></select></div>
+            <div class="field"><label>Staff contact ID</label><input name="staffContactId" placeholder="Optional if phone is enough" value="${escapeHtml(editingRouting?.staffContactId || "")}"></div>
+            <div class="field"><label>Staff phone number</label><input name="staffPhone" required placeholder="+1 555 010 1400" value="${escapeHtml(editingRouting?.staffPhone || "")}"></div>
+            <div class="field"><label>Expected phrase</label><input name="expectedPhrase" value="${escapeHtml(editingRouting?.expectedPhrase || "New form submission")}"></div>
+            <div class="field"><label>Expected delay window</label><select name="expectedDelayMinutes"><option value="5" ${Number(editingRouting?.expectedDelayMinutes || 10) === 5 ? "selected" : ""}>5 minutes</option><option value="10" ${Number(editingRouting?.expectedDelayMinutes || 10) === 10 ? "selected" : ""}>10 minutes</option><option value="15" ${Number(editingRouting?.expectedDelayMinutes || 10) === 15 ? "selected" : ""}>15 minutes</option><option value="30" ${Number(editingRouting?.expectedDelayMinutes || 10) === 30 ? "selected" : ""}>30 minutes</option></select></div>
           </div>
           <p class="muted">Routing checks are read-only. The app verifies staff notification evidence; it does not send or resend notifications.</p>
-          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.save} Save routing setup</button></div>
+          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.save} ${editingRouting ? "Save routing changes" : "Save routing setup"}</button>${editingRouting ? `<button class="btn secondary" type="button" data-cancel-routing-edit>Cancel edit</button>` : ""}</div>
         </form>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Client</th><th>Staff contact</th><th>Phone</th><th>Phrase</th><th>Delay</th><th>Status</th></tr></thead>
-            <tbody>${routingRows || `<tr><td colspan="6"><div class="empty">No routing setup has been added for this client yet.</div></td></tr>`}</tbody>
+            <thead><tr><th>Client</th><th>Staff contact</th><th>Phone</th><th>Phrase</th><th>Delay</th><th>Status</th><th>Action</th></tr></thead>
+            <tbody>${routingRows || `<tr><td colspan="7"><div class="empty">No routing setup has been added for this client yet.</div></td></tr>`}</tbody>
           </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div><h2>System status</h2><p>Short server-side status. Detailed setup stays in Railway and Supabase.</p></div>
+        </div>
+        <div class="evidence-list">
+          ${statusItems.map((item) => `<div class="evidence-item"><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join("")}
         </div>
       </section>
     </div>
@@ -721,13 +740,26 @@ function renderClients() {
       }
     });
   });
+  document.querySelectorAll("[data-edit-routing]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingRoutingId = button.dataset.editRouting;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-cancel-routing-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingRoutingId = "";
+      render();
+    });
+  });
   document.querySelector("#routing-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
     try {
       const payload = await api("/api/routing", { method: "POST", body: JSON.stringify(body) });
       state.routingSetups = payload.routingSetups;
-      showToast("Routing setup saved.");
+      state.editingRoutingId = "";
+      showToast(body.id ? "Routing setup updated." : "Routing setup saved.");
     } catch (error) {
       showToast(errorMessage(error));
     }
