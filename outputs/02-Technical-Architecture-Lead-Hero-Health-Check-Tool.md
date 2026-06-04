@@ -138,18 +138,30 @@ Not allowed:
 
 ### Recommended Read-Only Scopes
 
-Exact scope names should be confirmed in the HighLevel UI/API docs during implementation, but the PIT should be limited to read-only equivalents of:
+HighLevel Private Integration Tokens should use the smallest possible read-only scope set. For the current Lead Hero Health Check Tool, request these scopes first:
 
 ```text
 contacts.readonly
 conversations.readonly
 conversations/message.readonly
-workflows.readonly
 opportunities.readonly
-calendars/events.readonly
 locations/tags.readonly
-custom-fields.readonly
+locations/customFields.readonly
+locations.readonly
 ```
+
+Add these only if the related feature is actively used:
+
+```text
+calendars/events.readonly
+forms.readonly
+locations/tasks.readonly
+users.readonly
+conversations/reports.readonly
+workflows.readonly
+```
+
+Do not request `.write`, `collectPayment`, `sendLink`, or outbound-communication scopes for this app. The backend must also keep its HighLevel API client allowlisted to read-only endpoints so an over-scoped PIT still cannot mutate HighLevel data.
 
 ## ClickUp Integration
 
@@ -194,6 +206,12 @@ Fields:
 - ghl_private_integration_token_preview
 - clickup_task_id
 - timezone
+- form_lead_tag
+- active_pipeline_name
+- active_pipeline_id
+- reply_stage_name
+- reply_stage_id
+- reply_stage_window_hours
 - status
 - created_at
 - updated_at
@@ -409,12 +427,34 @@ Responsibilities:
 
 - Pull leads received
 - Check routing evidence
-- Check workflow metadata
+- Check automation outcomes from form-lead contacts, active-pipeline opportunities, staff notifications, and first-reply stage movement
+- Check workflow metadata where the scope is available
 - Check attribution coverage
 - Pull call records
 - Attach selected blast analysis
 - Generate Green/Yellow/Red status
 - Generate ClickUp comment text
+
+### automationsFiring outcome check
+
+The app does not inspect HighLevel workflow nodes. It infers whether the lead-flow automations are firing by reading visible outcomes:
+
+- Contact search finds new contacts in the selected date range with the configured form lead tag, usually `form lead`.
+- Opportunity search checks whether each form-lead contact has an opportunity in the configured active pipeline.
+- Conversation/message export checks whether staff notification messages were sent to configured staff contact(s) with the `New form submission` phrase.
+- Conversation/message export checks whether the contact sent a first reply.
+- If a first reply exists, opportunity search checks whether the contact's opportunity is now in the configured first-reply stage.
+
+Read-only HighLevel endpoints used for this outcome check:
+
+```text
+POST /contacts/search
+GET /conversations/messages/export
+POST /opportunities/search
+GET /opportunities/search
+```
+
+The first-reply stage check is conditional. If a form lead has not replied, the tool should not mark the reply-stage movement as failed.
 
 ### blastAnalysisService
 

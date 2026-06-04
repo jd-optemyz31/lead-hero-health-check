@@ -124,6 +124,12 @@ function localApi(path, options = {}, originalError) {
       locationId: body.locationId,
       clickupTaskId: body.clickupTaskId || "",
       timezone: body.timezone || "America/New_York",
+      formLeadTag: body.formLeadTag || "form lead",
+      activePipelineName: body.activePipelineName || "",
+      activePipelineId: body.activePipelineId || "",
+      replyStageName: body.replyStageName || "",
+      replyStageId: body.replyStageId || "",
+      replyStageWindowHours: Number(body.replyStageWindowHours || 24),
       tokenPreview: body.pitToken ? `${body.pitToken.slice(0, 4)}...${body.pitToken.slice(-4)}` : "local",
       hasToken: Boolean(body.pitToken),
       createdAt: now,
@@ -236,6 +242,17 @@ function localBlastAnalysis(client, body) {
 
 function localMonthlyReport(store, client, body) {
   const blast = store.blastAnalyses.find((item) => item.id === body.blastAnalysisId);
+  const automationFlow = {
+    status: "Yes",
+    formLeadTag: client.formLeadTag || "form lead",
+    activePipeline: client.activePipelineId || client.activePipelineName || "Sample active pipeline",
+    replyStage: client.replyStageId || client.replyStageName || "Sample replied stage",
+    formLeadCount: 84,
+    activePipelineOpportunities: 82,
+    contactsWithReply: 18,
+    repliedContactsInStage: 17,
+    detail: "84 sample form-lead contacts, 82 active-pipeline opportunity matches, 18 first replies, 17 confirmed in reply stage."
+  };
   const metrics = {
     routingWorking: "Yes",
     automationsFiring: "Yes",
@@ -247,6 +264,7 @@ function localMonthlyReport(store, client, body) {
     callsMissed: 8,
     missedRate: 8 / 49,
     attributionCoverage: 88,
+    automationFlow,
     issues: [],
     nextMonthFocus: "Maintain current routing, attribution, and response tracking.",
     status: "Green"
@@ -290,7 +308,8 @@ ${metrics.nextMonthFocus}`;
       { label: "Routing evidence", detail: "82 matching workflow messages contained New form submission." },
       { label: "Attribution coverage", detail: "88% of sample leads have attribution or source fields populated." },
       { label: "Call activity", detail: "41 answered and 8 missed calls found in the selected period." },
-      { label: "Workflow metadata", detail: "Workflow metadata check is read-only. Node-level inspection is intentionally not claimed." }
+      { label: "Workflow metadata", detail: "Workflow metadata check is read-only. Node-level inspection is intentionally not claimed." },
+      { label: "Automation flow", detail: automationFlow.detail }
     ],
     createdAt: new Date().toISOString()
   };
@@ -445,6 +464,7 @@ function renderClients() {
     <tr>
       <td><strong>${escapeHtml(client.name)}</strong><br><span class="muted">${escapeHtml(client.timezone)}</span></td>
       <td>${escapeHtml(client.locationId)}</td>
+      <td><strong>${escapeHtml(client.formLeadTag || "form lead")}</strong><br><span class="muted">${escapeHtml(client.activePipelineName || client.activePipelineId || "Pipeline not set")} -> ${escapeHtml(client.replyStageName || client.replyStageId || "Reply stage not set")}</span></td>
       <td>${client.hasToken ? badge("Token saved") : badge("Missing token")}</td>
       <td>${client.clickupTaskId ? escapeHtml(client.clickupTaskId) : badge("Missing ClickUp")}</td>
       <td>${new Date(client.updatedAt).toLocaleDateString()}</td>
@@ -465,7 +485,14 @@ function renderClients() {
             <div class="field"><label>HighLevel location ID</label><input name="locationId" required placeholder="Location/sub-account ID"></div>
             <div class="field"><label>ClickUp task ID</label><input name="clickupTaskId" placeholder="ClickUp client task ID"></div>
             <div class="field"><label>Read-only Private Integration Token</label><input name="pitToken" type="password" required placeholder="Encrypted server-side after saving"></div>
+            <div class="field"><label>Form lead tag</label><input name="formLeadTag" value="form lead"></div>
+            <div class="field"><label>Active pipeline name</label><input name="activePipelineName" placeholder="#1 Active Pipeline"></div>
+            <div class="field"><label>Active pipeline ID</label><input name="activePipelineId" placeholder="Optional exact pipeline ID"></div>
+            <div class="field"><label>First reply stage name</label><input name="replyStageName" placeholder="Replied / Engaged / Needs Follow Up"></div>
+            <div class="field"><label>First reply stage ID</label><input name="replyStageId" placeholder="Optional exact stage ID"></div>
+            <div class="field"><label>Reply movement window</label><input name="replyStageWindowHours" type="number" min="1" value="24"></div>
           </div>
+          <p class="muted">Automation firing is checked with read-only evidence: form-lead contacts, opportunities in the active pipeline, staff notification messages, and reply-stage movement after the contact replies.</p>
           <p class="muted">Use read-only HighLevel scopes only. Tokens are never shown again after saving and must not be stored in code or Railway variables per client.</p>
           <div class="actions"><button class="btn primary" type="submit">${icons.save} Save client</button></div>
         </form>
@@ -476,8 +503,8 @@ function renderClients() {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Client</th><th>Location ID</th><th>HighLevel token</th><th>ClickUp task</th><th>Updated</th><th>Connection</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="6"><div class="empty">Add your first client to start running Lead Hero health checks.</div></td></tr>`}</tbody>
+            <thead><tr><th>Client</th><th>Location ID</th><th>Automation flow</th><th>HighLevel token</th><th>ClickUp task</th><th>Updated</th><th>Connection</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="7"><div class="empty">Add your first client to start running Lead Hero health checks.</div></td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -686,6 +713,9 @@ function renderMonthly() {
 
 function renderReport(report) {
   const m = report.metrics;
+  const automationFoot = m.automationFlow
+    ? `${m.automationFlow.activePipelineOpportunities}/${m.automationFlow.formLeadCount} opps, ${m.automationFlow.repliedContactsInStage}/${m.automationFlow.contactsWithReply} reply-stage`
+    : "Outcome-based evidence";
   return `
     <section class="status-hero">
       <div>
@@ -697,7 +727,7 @@ function renderReport(report) {
     </section>
     <section class="grid six">
       ${metricCard("Routing Working", m.routingWorking, `${m.routingMessages} notification matches`)}
-      ${metricCard("Automations Firing", m.automationsFiring, "Outcome-based evidence")}
+      ${metricCard("Automations Firing", m.automationsFiring, automationFoot)}
       ${metricCard("Attribution", m.attributionIntact, `${m.attributionCoverage}% coverage`)}
       ${metricCard("Leads Received", m.leadsReceived, "Selected date range")}
       ${metricCard("Answered Calls", m.callsAnswered, `${m.callsMissed} missed`)}

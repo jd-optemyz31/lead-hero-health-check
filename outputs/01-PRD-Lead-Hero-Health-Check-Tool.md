@@ -55,6 +55,9 @@ Store each client setup:
 - ClickUp task ID
 - Timezone
 - Default reporting preferences
+- Form lead tag, defaulting to `form lead`
+- Active pipeline name or ID
+- Expected first-reply stage name or ID
 
 ### Routing Setup
 
@@ -142,6 +145,15 @@ Define expected workflow outcomes, such as:
 - SMS or email message exists
 
 This is used to infer whether automations are firing correctly.
+
+For the MVP, Automations Firing is checked through read-only outcome evidence:
+
+1. A new contact was created in the selected date range with the configured form lead tag, usually `form lead`.
+2. A matching opportunity exists for that contact in the configured active pipeline.
+3. Staff notification evidence exists using the configured routing contact(s) and `New form submission` phrase.
+4. If the contact sent a first reply, the matching opportunity is checked against the configured first-reply stage.
+
+No first reply should not count as a reply-stage failure. The reply-stage check only applies after the contact has actually replied.
 
 ### Scheduled Monthly Checks
 
@@ -275,6 +287,7 @@ Version one includes:
 - Full workflow node inspection
 - Fully automatic posting without review
 - Replacing HighLevel workflows
+- Updating opportunities when a reply is found
 
 ## Success Metrics
 

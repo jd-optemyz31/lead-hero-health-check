@@ -18,10 +18,25 @@ create table if not exists public.clients (
   ghl_private_integration_token_preview text not null default '',
   clickup_task_id text not null default '',
   timezone text not null default 'America/New_York',
+  form_lead_tag text not null default 'form lead',
+  active_pipeline_name text not null default '',
+  active_pipeline_id text not null default '',
+  reply_stage_name text not null default '',
+  reply_stage_id text not null default '',
+  reply_stage_window_hours integer not null default 24 check (reply_stage_window_hours > 0),
   status text not null default 'active',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.clients add column if not exists form_lead_tag text not null default 'form lead';
+alter table public.clients add column if not exists active_pipeline_name text not null default '';
+alter table public.clients add column if not exists active_pipeline_id text not null default '';
+alter table public.clients add column if not exists reply_stage_name text not null default '';
+alter table public.clients add column if not exists reply_stage_id text not null default '';
+alter table public.clients add column if not exists reply_stage_window_hours integer not null default 24;
+alter table public.clients drop constraint if exists clients_reply_stage_window_hours_check;
+alter table public.clients add constraint clients_reply_stage_window_hours_check check (reply_stage_window_hours > 0);
 
 create table if not exists public.client_assignments (
   id uuid primary key default gen_random_uuid(),
@@ -225,7 +240,7 @@ create policy audit_admin_read on public.api_audit_logs
   using (public.is_admin());
 
 revoke all on public.clients from anon, authenticated;
-grant select (id, name, ghl_location_id, ghl_private_integration_token_preview, clickup_task_id, timezone, status, created_at, updated_at)
+grant select (id, name, ghl_location_id, ghl_private_integration_token_preview, clickup_task_id, timezone, form_lead_tag, active_pipeline_name, active_pipeline_id, reply_stage_name, reply_stage_id, reply_stage_window_hours, status, created_at, updated_at)
   on public.clients to authenticated;
 grant select, insert, update on public.app_users to authenticated;
 grant select, insert, update on public.client_assignments to authenticated;

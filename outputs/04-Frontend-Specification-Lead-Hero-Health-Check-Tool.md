@@ -66,6 +66,10 @@ Fields:
 - HighLevel Private Integration Token
 - ClickUp task ID
 - Timezone
+- Form lead tag, default `form lead`
+- Active pipeline name or ID
+- First reply stage name or ID
+- Reply movement window
 
 Safety text near token field:
 
@@ -163,6 +167,16 @@ Sections:
 - Blasts
 - Issues
 - Next Month Focus
+
+Automations Firing evidence should show:
+
+- Form-lead contacts found
+- Active-pipeline opportunities found
+- Staff notification matches
+- First replies found
+- Replied contacts confirmed in the expected reply stage
+
+If no first reply exists for a contact, the UI should not show that contact as a reply-stage failure.
 
 ### Reports
 
@@ -359,6 +373,8 @@ Data used:
 - Tags
 - Custom fields
 - Calendar events if needed
+
+Automations Firing uses read-only outcome evidence from contacts, conversations/messages, and opportunities. The app checks the configured form lead tag, active pipeline, staff notification phrase, and first-reply stage. It does not update opportunities or trigger workflows.
 
 Frontend behavior:
 

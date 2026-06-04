@@ -119,24 +119,217 @@ The app must not include UI, backend routes, API clients, or permissions for:
 - Updating workflows
 - Triggering automations
 
+### Automations Firing Safety Model
+
+Automations Firing is an outcome check. The app reads evidence that HighLevel automations appear to have produced the expected results, but it must not trigger or repair those automations.
+
+Allowed read-only checks:
+
+- Read form-lead contacts by selected date range and configured tag, usually `form lead`.
+- Read opportunities for those contacts.
+- Check whether an opportunity exists in the configured active pipeline.
+- Read staff notification messages containing `New form submission`.
+- Read conversation messages to identify whether a contact has sent a first reply.
+- If a first reply exists, read the opportunity's current stage and compare it with the configured first-reply stage.
+
+Blocked automation-related actions:
+
+- Do not create the missing opportunity.
+- Do not move the opportunity to the reply stage.
+- Do not add or remove the form lead tag.
+- Do not send or resend the staff notification.
+- Do not enroll or re-enroll the contact in a workflow.
+- Do not modify the workflow.
+
+If evidence is missing, the tool should report `No` or `Partial` and include the issue in the ClickUp-ready report for human review.
+
 ### Scope Policy
 
 HighLevel Private Integration Tokens should be created with read-only scopes only.
 
-Recommended read-only categories:
+Recommended MVP scopes:
 
 ```text
 contacts.readonly
 conversations.readonly
 conversations/message.readonly
-workflows.readonly
 opportunities.readonly
-calendars/events.readonly
 locations/tags.readonly
-custom-fields.readonly
+locations/customFields.readonly
+locations.readonly
 ```
 
-If a write scope is accidentally included in a token, the app still must not expose or call any write endpoint.
+Optional read-only scopes, only when the related feature is active:
+
+```text
+calendars/events.readonly
+forms.readonly
+locations/tasks.readonly
+users.readonly
+conversations/reports.readonly
+workflows.readonly
+```
+
+Do not request write or action scopes for this app. Blocked scope patterns include:
+
+- Any scope ending in `.write`
+- Any scope that sends links, messages, documents, or contracts
+- Any scope that collects payments
+- Any scope that can update live chat state, automations, contacts, tags, workflows, opportunities, or account setup
+
+If a write scope is accidentally included in a token, the app still must not expose or call any write endpoint. The backend HighLevel client should keep a read-only endpoint allowlist so token permissions cannot expand app behavior.
+
+### HighLevel API 2.0 Scope Reference
+
+The following scope list was provided for HighLevel API 2.0 planning. It is a reference list, not an approval list. For this tool, only the recommended read-only scopes above should be requested unless a specific feature justifies another read-only scope.
+
+```text
+businesses.readonly
+businesses.write
+calendars.readonly
+calendars.write
+calendars/events.readonly
+calendars/events.write
+calendars/groups.readonly
+calendars/groups.write
+calendars/resources.readonly
+calendars/resources.write
+campaigns.readonly
+conversations.readonly
+conversations.write
+conversations/message.readonly
+conversations/message.write
+conversations/reports.readonly
+conversations/livechat.write
+contacts.readonly
+contacts.write
+objects/schema.readonly
+objects/schema.write
+objects/record.readonly
+objects/record.write
+associations.write
+associations.readonly
+associations/relation.readonly
+associations/relation.write
+courses.write
+courses.readonly
+forms.readonly
+forms.write
+invoices.readonly
+invoices.write
+invoices/schedule.readonly
+invoices/schedule.write
+invoices/template.readonly
+invoices/template.write
+invoices/estimate.readonly
+invoices/estimate.write
+links.readonly
+lc-email.readonly
+links.write
+locations.readonly
+locations/customValues.readonly
+locations/customValues.write
+locations/customFields.readonly
+locations/customFields.write
+locations/tasks.readonly
+locations/tasks.write
+recurring-tasks.readonly
+recurring-tasks.write
+locations/tags.readonly
+locations/tags.write
+locations/templates.readonly
+medias.readonly
+medias.write
+funnels/redirect.readonly
+funnels/page.readonly
+funnels/funnel.readonly
+funnels/pagecount.readonly
+funnels/redirect.write
+opportunities.readonly
+opportunities.write
+payments/orders.readonly
+payments/orders.write
+payments/orders.collectPayment
+payments/integration.readonly
+payments/integration.write
+payments/transactions.readonly
+payments/subscriptions.readonly
+payments/coupons.readonly
+payments/coupons.write
+payments/custom-provider.readonly
+payments/custom-provider.write
+products.readonly
+products.write
+products/prices.readonly
+products/prices.write
+products/collection.readonly
+products/collection.write
+saas/location.read
+saas/location.write
+socialplanner/oauth.readonly
+socialplanner/oauth.write
+socialplanner/post.readonly
+socialplanner/post.write
+socialplanner/account.readonly
+socialplanner/account.write
+socialplanner/csv.readonly
+socialplanner/csv.write
+socialplanner/category.readonly
+socialplanner/tag.readonly
+socialplanner/statistics.readonly
+store/shipping.readonly
+store/shipping.write
+store/setting.readonly
+store/setting.write
+surveys.readonly
+users.readonly
+users.write
+workflows.readonly
+emails/builder.write
+emails/builder.readonly
+emails/schedule.readonly
+emails/schedule.write
+wordpress.site.readonly
+blogs/post.write
+blogs/post-update.write
+blogs/check-slug.readonly
+blogs/category.readonly
+blogs/author.readonly
+socialplanner/category.write
+socialplanner/tag.write
+blogs/posts.readonly
+blogs/list.readonly
+brand-boards/design-kit.readonly
+brand-boards/design-kit.write
+brand-boards/voices.readonly
+brand-boards/voices.write
+chat-widget.readonly
+chat-widget.write
+charges.readonly
+charges.write
+marketplace-installer-details.readonly
+twilioaccount.read
+phonenumbers.read
+phonenumbers.write
+numberpools.read
+documents_contracts/list.readonly
+documents_contracts/sendLink.write
+documents_contracts_template/sendLink.write
+documents_contracts_template/list.readonly
+voice-ai-dashboard.readonly
+voice-ai-agents.readonly
+voice-ai-agents.write
+voice-ai-agent-goals.readonly
+voice-ai-agent-goals.write
+knowledge-bases.write
+knowledge-bases.readonly
+conversation-ai.readonly
+conversation-ai.write
+agent-studio.readonly
+agent-studio.write
+adPublishing.readonly
+adPublishing.write
+```
 
 ## ClickUp Access Rules
 

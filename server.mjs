@@ -29,6 +29,8 @@ const highLevelReadAllowlist = new Set([
   "POST /contacts/search",
   "GET /conversations/search",
   "GET /conversations/messages/export",
+  "GET /opportunities/search",
+  "POST /opportunities/search",
   "GET /workflows",
   "GET /workflows/"
 ]);
@@ -109,6 +111,12 @@ function clientFromRow(row) {
     locationId: row.ghl_location_id,
     clickupTaskId: row.clickup_task_id || "",
     timezone: row.timezone || "America/New_York",
+    formLeadTag: row.form_lead_tag || "form lead",
+    activePipelineName: row.active_pipeline_name || "",
+    activePipelineId: row.active_pipeline_id || "",
+    replyStageName: row.reply_stage_name || "",
+    replyStageId: row.reply_stage_id || "",
+    replyStageWindowHours: Number(row.reply_stage_window_hours || 24),
     tokenPreview: row.ghl_private_integration_token_preview || "",
     tokenCiphertext: row.ghl_private_integration_token_encrypted || "",
     createdAt: row.created_at,
@@ -123,6 +131,12 @@ function clientToRow(client) {
     ghl_location_id: client.locationId,
     clickup_task_id: client.clickupTaskId || "",
     timezone: client.timezone || "America/New_York",
+    form_lead_tag: client.formLeadTag || "form lead",
+    active_pipeline_name: client.activePipelineName || "",
+    active_pipeline_id: client.activePipelineId || "",
+    reply_stage_name: client.replyStageName || "",
+    reply_stage_id: client.replyStageId || "",
+    reply_stage_window_hours: Number(client.replyStageWindowHours || 24),
     ghl_private_integration_token_preview: client.tokenPreview || "",
     ghl_private_integration_token_encrypted: client.tokenCiphertext || "",
     created_at: client.createdAt,
@@ -458,7 +472,7 @@ function sanitizeApiDetail(text = "") {
   return clean.length > 240 ? `${clean.slice(0, 240)}...` : clean;
 }
 
-async function highLevelRequest(client, { method = "GET", endpointPath, query = {}, body }) {
+async function highLevelRequest(client, { method = "GET", endpointPath, query = {}, body, apiVersion = defaultHighLevelApiVersion }) {
   assertHighLevelReadOnly(method, endpointPath);
   const token = decryptToken(client.tokenCiphertext);
   if (!token) {
@@ -478,7 +492,7 @@ async function highLevelRequest(client, { method = "GET", endpointPath, query = 
       "authorization": `Bearer ${token}`,
       "accept": "application/json",
       "content-type": "application/json",
-      "version": defaultHighLevelApiVersion
+      "version": apiVersion
     },
     body: body ? JSON.stringify(body) : undefined
   });
@@ -528,6 +542,10 @@ function extractWorkflows(payload) {
   return findFirstArrayByKeys(payload, ["workflows", "items", "results", "data"]);
 }
 
+function extractOpportunities(payload) {
+  return findFirstArrayByKeys(payload, ["opportunities", "items", "results", "data"]);
+}
+
 function timestampOf(record) {
   const value = record.createdAt || record.dateAdded || record.dateCreated || record.updatedAt || record.timestamp || record.messageDate || record.date;
   if (!value) return 0;
@@ -560,6 +578,35 @@ function messageContactId(message) {
   return valueText(message, ["contactId", "contact_id", "contactID"]);
 }
 
+function contactId(contact) {
+  return valueText(contact, ["id", "contactId", "contact_id", "_id"]);
+}
+
+function opportunityContactId(opportunity) {
+  return valueText(opportunity, ["contactId", "contact_id", "contactID"]) ||
+    valueText(opportunity.contact || {}, ["id", "contactId"]);
+}
+
+function opportunityPipelineId(opportunity) {
+  return valueText(opportunity, ["pipelineId", "pipeline_id", "pipelineID"]);
+}
+
+function opportunityPipelineName(opportunity) {
+  const pipeline = opportunity.pipeline || opportunity.pipelineDetails || {};
+  return valueText(opportunity, ["pipelineName", "pipeline_name", "pipeline"]) ||
+    valueText(pipeline, ["name", "title"]);
+}
+
+function opportunityStageId(opportunity) {
+  return valueText(opportunity, ["pipelineStageId", "pipeline_stage_id", "stageId", "stage_id", "stageID"]);
+}
+
+function opportunityStageName(opportunity) {
+  const stage = opportunity.stage || opportunity.pipelineStage || opportunity.pipelineStageDetails || {};
+  return valueText(opportunity, ["stageName", "stage_name", "pipelineStageName", "status"]) ||
+    valueText(stage, ["name", "title"]);
+}
+
 function messagePhone(message) {
   return valueText(message, ["phone", "to", "from", "contactPhone", "phoneNumber"]);
 }
@@ -567,6 +614,11 @@ function messagePhone(message) {
 function isOutboundMessage(message) {
   const direction = valueText(message, ["direction", "messageDirection", "type"]).toLowerCase();
   return direction.includes("out") || direction.includes("sent");
+}
+
+function isInboundMessage(message) {
+  const direction = valueText(message, ["direction", "messageDirection", "type"]).toLowerCase();
+  return direction.includes("in") || direction.includes("received");
 }
 
 function contactName(contact) {
@@ -659,6 +711,55 @@ async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = 
   }
 }
 
+async function highLevelSearchOpportunities(client, { contactIdValue = "", dateStart, dateEnd, limit = 100 }) {
+  const filters = [];
+  if (contactIdValue) filters.push({ field: "contactId", operator: "eq", value: contactIdValue });
+  if (dateStart && dateEnd) {
+    filters.push({
+      field: "dateAdded",
+      operator: "range",
+      value: {
+        gte: `${dateStart}T00:00:00.000Z`,
+        lte: `${dateEnd}T23:59:59.999Z`
+      }
+    });
+  }
+
+  try {
+    const payload = await highLevelRequest(client, {
+      method: "POST",
+      endpointPath: "/opportunities/search",
+      apiVersion: "2023-02-21",
+      body: {
+        locationId: client.locationId,
+        page: 1,
+        pageLimit: limit,
+        filters
+      }
+    });
+    return extractOpportunities(payload).filter((opportunity) => {
+      const matchesContact = !contactIdValue || opportunityContactId(opportunity) === contactIdValue;
+      return matchesContact && isWithinDateRange(opportunity, dateStart, dateEnd);
+    });
+  } catch (error) {
+    const payload = await highLevelRequest(client, {
+      method: "GET",
+      endpointPath: "/opportunities/search",
+      query: {
+        location_id: client.locationId,
+        locationId: client.locationId,
+        contact_id: contactIdValue,
+        contactId: contactIdValue,
+        limit
+      }
+    });
+    return extractOpportunities(payload).filter((opportunity) => {
+      const matchesContact = !contactIdValue || opportunityContactId(opportunity) === contactIdValue;
+      return matchesContact && isWithinDateRange(opportunity, dateStart, dateEnd);
+    });
+  }
+}
+
 async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "" }) {
   const messages = [];
   let cursor = "";
@@ -718,13 +819,150 @@ function deterministicNumber(seed, min, max) {
 }
 
 function classifyStatus(metrics) {
-  if (metrics.routingWorking === "No" || metrics.attributionIntact === "No" || metrics.callsTracked === "No") {
+  if (metrics.routingWorking === "No" || metrics.automationsFiring === "No" || metrics.attributionIntact === "No" || metrics.callsTracked === "No") {
     return "Red";
   }
   if (metrics.routingWorking === "Partial" || metrics.automationsFiring === "Partial" || metrics.attributionIntact === "Partial" || metrics.missedRate > 0.3) {
     return "Yellow";
   }
   return "Green";
+}
+
+function textMatchesConfigured(value, configuredValue) {
+  if (!configuredValue) return true;
+  const clean = String(value || "").trim().toLowerCase();
+  const configured = String(configuredValue || "").trim().toLowerCase();
+  return clean === configured || clean.includes(configured) || configured.includes(clean);
+}
+
+function opportunityMatchesPipeline(opportunity, client) {
+  const configuredId = String(client.activePipelineId || "").trim();
+  const configuredName = String(client.activePipelineName || "").trim();
+  if (!configuredId && !configuredName) return true;
+  if (configuredId && opportunityPipelineId(opportunity) === configuredId) return true;
+  return configuredName ? textMatchesConfigured(opportunityPipelineName(opportunity), configuredName) : false;
+}
+
+function opportunityMatchesReplyStage(opportunity, client) {
+  const configuredId = String(client.replyStageId || "").trim();
+  const configuredName = String(client.replyStageName || "").trim();
+  if (!configuredId && !configuredName) return false;
+  if (configuredId && opportunityStageId(opportunity) === configuredId) return true;
+  return configuredName ? textMatchesConfigured(opportunityStageName(opportunity), configuredName) : false;
+}
+
+function firstInboundReply(messages, contactIdValue) {
+  const contactMessages = messages
+    .filter((message) => messageContactId(message) === contactIdValue)
+    .sort((a, b) => timestampOf(a) - timestampOf(b));
+  const firstOutboundAt = timestampOf(contactMessages.find(isOutboundMessage) || {});
+  if (!firstOutboundAt) return undefined;
+  return contactMessages.find((message) => isInboundMessage(message) && timestampOf(message) > firstOutboundAt);
+}
+
+async function loadOpportunitiesForContacts(client, contacts, { dateStart, dateEnd }) {
+  const pairs = [];
+  let errorCount = 0;
+  const ids = contacts.map(contactId).filter(Boolean).slice(0, 100);
+  for (let index = 0; index < ids.length; index += 5) {
+    const batch = ids.slice(index, index + 5);
+    const results = await Promise.all(batch.map(async (id) => {
+      try {
+        return [id, await highLevelSearchOpportunities(client, {
+          contactIdValue: id,
+          dateStart,
+          dateEnd,
+          limit: 25
+        })];
+      } catch (error) {
+        errorCount += 1;
+        return [id, []];
+      }
+    }));
+    pairs.push(...results);
+  }
+  return { map: new Map(pairs), errorCount };
+}
+
+function buildAutomationFlowEvidence({ client, formLeadContacts, opportunitiesByContact, opportunitySearchErrors = 0, messages, routingWorking }) {
+  const configuredPipeline = client.activePipelineId || client.activePipelineName;
+  const configuredReplyStage = client.replyStageId || client.replyStageName;
+  const formLeadCount = formLeadContacts.length;
+  let activePipelineOpportunities = 0;
+  let contactsWithReply = 0;
+  let repliedContactsInStage = 0;
+
+  formLeadContacts.forEach((contact) => {
+    const id = contactId(contact);
+    const opportunities = opportunitiesByContact.get(id) || [];
+    const activeOpportunities = opportunities.filter((opportunity) => opportunityMatchesPipeline(opportunity, client));
+    if (activeOpportunities.length) activePipelineOpportunities += 1;
+
+    const reply = firstInboundReply(messages, id);
+    if (reply) {
+      contactsWithReply += 1;
+      if (activeOpportunities.some((opportunity) => opportunityMatchesReplyStage(opportunity, client))) {
+        repliedContactsInStage += 1;
+      }
+    }
+  });
+
+  const issues = [];
+  let status = "Yes";
+  if (!configuredPipeline) {
+    status = "Partial";
+    issues.push("Active pipeline name or ID is not configured for the client.");
+  }
+  if (opportunitySearchErrors > 0) {
+    status = "Partial";
+    issues.push(`Opportunity search could not be completed for ${opportunitySearchErrors} form-lead contact(s).`);
+  }
+  if (!configuredReplyStage && contactsWithReply > 0) {
+    status = "Partial";
+    issues.push("Reply stage is not configured, so first-reply movement could not be confirmed.");
+  }
+  if (formLeadCount === 0) {
+    status = "Partial";
+  } else if (opportunitySearchErrors >= formLeadCount) {
+    status = "Partial";
+  } else if (activePipelineOpportunities === 0) {
+    status = "No";
+    issues.push(`No form-lead contacts had a matching opportunity in ${configuredPipeline || "the configured active pipeline"}.`);
+  } else if (activePipelineOpportunities < formLeadCount) {
+    status = "Partial";
+    issues.push(`${formLeadCount - activePipelineOpportunities} form-lead contact(s) did not have a matching active-pipeline opportunity.`);
+  }
+
+  if (routingWorking === "No" && formLeadCount > 0) {
+    status = "No";
+    issues.push("Staff notification evidence was missing for form-lead activity.");
+  } else if (routingWorking === "Partial" && status === "Yes") {
+    status = "Partial";
+    issues.push("Staff notification evidence was only partially confirmed.");
+  }
+
+  if (contactsWithReply > 0 && configuredReplyStage) {
+    if (repliedContactsInStage === 0) {
+      status = status === "No" ? "No" : "Partial";
+      issues.push("Contacts replied, but no matching opportunities were found in the expected reply stage.");
+    } else if (repliedContactsInStage < contactsWithReply) {
+      status = status === "No" ? "No" : "Partial";
+      issues.push(`${contactsWithReply - repliedContactsInStage} replied contact(s) were not confirmed in the expected reply stage.`);
+    }
+  }
+
+  return {
+    status,
+    formLeadTag: client.formLeadTag || "form lead",
+    activePipeline: configuredPipeline || "Not configured",
+    replyStage: configuredReplyStage || "Not configured",
+    formLeadCount,
+    activePipelineOpportunities,
+    contactsWithReply,
+    repliedContactsInStage,
+    issues,
+    detail: `${formLeadCount} form-lead contact(s), ${activePipelineOpportunities} active-pipeline opportunity match(es), ${contactsWithReply} first reply/replies, ${repliedContactsInStage} confirmed in reply stage.`
+  };
 }
 
 function statusSymbol(status) {
@@ -904,7 +1142,21 @@ function generateMonthlyReport({ store, client, dateStart, dateEnd, blastAnalysi
   const attributionCoverage = deterministicNumber(`${seed}:attr`, 68, 96);
   const missedRate = callsMissed / Math.max(1, callsAnswered + callsMissed);
   const routingWorking = !routing.length ? "No" : routingMessages / Math.max(1, leadsReceived) >= 0.9 ? "Yes" : "Partial";
-  const automationsFiring = routingWorking === "No" ? "Partial" : "Yes";
+  const automationFlow = {
+    status: routingWorking === "No" ? "Partial" : "Yes",
+    formLeadTag: client.formLeadTag || "form lead",
+    activePipeline: client.activePipelineId || client.activePipelineName || "Sample active pipeline",
+    replyStage: client.replyStageId || client.replyStageName || "Sample replied stage",
+    formLeadCount: leadsReceived,
+    activePipelineOpportunities: Math.max(0, leadsReceived - deterministicNumber(`${seed}:opp-gap`, 0, 4)),
+    contactsWithReply: deterministicNumber(`${seed}:replies`, 2, Math.min(18, leadsReceived)),
+    repliedContactsInStage: 0,
+    issues: [],
+    detail: ""
+  };
+  automationFlow.repliedContactsInStage = Math.max(0, automationFlow.contactsWithReply - deterministicNumber(`${seed}:stage-gap`, 0, 2));
+  automationFlow.detail = `${automationFlow.formLeadCount} sample form-lead contact(s), ${automationFlow.activePipelineOpportunities} active-pipeline opportunity match(es), ${automationFlow.contactsWithReply} first reply/replies, ${automationFlow.repliedContactsInStage} confirmed in reply stage.`;
+  const automationsFiring = automationFlow.status;
   const attributionIntact = attributionCoverage >= 80 ? "Yes" : attributionCoverage >= 60 ? "Partial" : "No";
   const callsTracked = callsAnswered + callsMissed > 0 ? "Yes" : "No";
   const issues = [];
@@ -926,6 +1178,7 @@ function generateMonthlyReport({ store, client, dateStart, dateEnd, blastAnalysi
     callsMissed,
     missedRate,
     attributionCoverage,
+    automationFlow,
     issues,
     nextMonthFocus: issues.length ? "Review the flagged items, confirm workflow evidence, and improve follow-up coverage." : "Maintain current routing, attribution, and response tracking.",
     status: "Green"
@@ -963,6 +1216,10 @@ function generateMonthlyReport({ store, client, dateStart, dateEnd, blastAnalysi
       {
         label: "Workflow metadata",
         detail: "Workflow metadata check is read-only. Node-level inspection is intentionally not claimed."
+      },
+      {
+        label: "Automation flow",
+        detail: automationFlow.detail
       }
     ],
     createdAt: new Date().toISOString()
@@ -975,9 +1232,11 @@ async function generateLiveMonthlyReport({ store, client, dateStart, dateEnd, bl
   const blast = store.blastAnalyses.find((item) => item.id === blastAnalysisId);
   const issues = [];
   const partials = [];
-  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, limit: 100 });
+  const formLeadTag = client.formLeadTag || "form lead";
+  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag: formLeadTag, limit: 100 });
   const allMessages = await highLevelExportMessages(client, { dateStart, dateEnd });
   const callMessages = await highLevelExportMessages(client, { dateStart, dateEnd, channel: "Call" });
+  const opportunityResults = await loadOpportunitiesForContacts(client, contacts, { dateStart, dateEnd });
 
   let workflows = [];
   try {
@@ -1021,18 +1280,26 @@ async function generateLiveMonthlyReport({ store, client, dateStart, dateEnd, bl
     const status = String(workflow.status || "").toLowerCase();
     return status.includes("publish") || status.includes("active");
   }).length;
-  const automationsFiring = workflowMessages > 0 || activeWorkflows > 0 ? "Yes" : workflows.length ? "Partial" : "Partial";
+  const automationFlow = buildAutomationFlowEvidence({
+    client,
+    formLeadContacts: contacts,
+    opportunitiesByContact: opportunityResults.map,
+    opportunitySearchErrors: opportunityResults.errorCount,
+    messages: allMessages,
+    routingWorking
+  });
+  const automationsFiring = automationFlow.status;
   const attributionIntact = leadsReceived === 0 ? "Partial" : attributionCoverage >= 80 ? "Yes" : attributionCoverage >= 60 ? "Partial" : "No";
   const callsTracked = callMessages.length > 0 ? "Yes" : "No";
 
   if (!routing.length) issues.push("Routing setup is missing staff notification contacts.");
   if (routingWorking === "No") issues.push(`No outbound staff notification messages containing "${expectedPhrase}" were found.`);
   if (routingWorking === "Partial") issues.push(`Workflow messages were found or there were no leads, but no exact staff notification match for "${expectedPhrase}" was confirmed.`);
+  issues.push(...automationFlow.issues);
   if (attributionIntact !== "Yes") issues.push(leadsReceived ? `Attribution coverage is ${attributionCoverage}%, which needs review.` : "No leads were found in the selected period, so attribution could not be confirmed.");
   if (callsTracked === "No") issues.push("No call records were found with channel=Call in the selected period.");
   if (missedRate > 0.3) issues.push("Missed call rate is above the attention threshold.");
   if (blast && blast.needsReviewCount > 0) issues.push(`${blast.needsReviewCount} blast replies need manual review.`);
-  issues.push(...partials);
 
   const metrics = {
     routingWorking,
@@ -1045,6 +1312,7 @@ async function generateLiveMonthlyReport({ store, client, dateStart, dateEnd, bl
     callsMissed,
     missedRate,
     attributionCoverage,
+    automationFlow,
     issues,
     nextMonthFocus: issues.length ? "Review the flagged items, confirm workflow evidence, and improve follow-up coverage." : "Maintain current routing, attribution, and response tracking.",
     status: "Green"
@@ -1073,7 +1341,7 @@ async function generateLiveMonthlyReport({ store, client, dateStart, dateEnd, bl
       },
       {
         label: "Lead contacts",
-        detail: `${leadsReceived} contact record(s) matched the selected date range through read-only contact search.`
+        detail: `${leadsReceived} contact record(s) matched tag "${formLeadTag}" in the selected date range through read-only contact search.`
       },
       {
         label: "Attribution coverage",
@@ -1088,6 +1356,10 @@ async function generateLiveMonthlyReport({ store, client, dateStart, dateEnd, bl
         detail: partials.length
           ? partials.join(" ")
           : `${workflows.length} workflow metadata record(s) were loaded read-only; node-level inspection is intentionally not claimed.`
+      },
+      {
+        label: "Automation flow",
+        detail: `${automationFlow.detail} Active workflow metadata records loaded: ${activeWorkflows}.`
       }
     ],
     createdAt: new Date().toISOString()
@@ -1186,6 +1458,12 @@ async function handleApi(req, res, pathname) {
       locationId: body.locationId.trim(),
       clickupTaskId: body.clickupTaskId?.trim() || "",
       timezone: body.timezone || "America/New_York",
+      formLeadTag: body.formLeadTag?.trim() || existing?.formLeadTag || "form lead",
+      activePipelineName: body.activePipelineName?.trim() || existing?.activePipelineName || "",
+      activePipelineId: body.activePipelineId?.trim() || existing?.activePipelineId || "",
+      replyStageName: body.replyStageName?.trim() || existing?.replyStageName || "",
+      replyStageId: body.replyStageId?.trim() || existing?.replyStageId || "",
+      replyStageWindowHours: Number(body.replyStageWindowHours || existing?.replyStageWindowHours || 24),
       tokenPreview: body.pitToken ? tokenPreview(body.pitToken) : existing?.tokenPreview || "",
       tokenCiphertext: body.pitToken ? encryptToken(body.pitToken) : existing?.tokenCiphertext || "",
       createdAt: body.createdAt || now,
