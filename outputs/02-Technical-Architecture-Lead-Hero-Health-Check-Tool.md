@@ -509,6 +509,8 @@ For live blast analysis, do not use contact creation date as the primary date fi
 
 When the server uses HighLevel contact search with a reply-tag filter, it should trust the server-side tag match if HighLevel returns contact rows without tag details. If the tag-filtered search returns no rows or fails, the server may retry a read-only unfiltered contact search and apply local tag matching only when tag metadata is present in the returned contacts.
 
+Message export pagination must be deep enough for the selected date window. The server should request larger read-only export pages where supported and continue through bounded cursors so replies are not missed just because newer account messages appear later in the selected range.
+
 ### clickupPostingService
 
 Responsibilities:

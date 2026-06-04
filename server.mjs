@@ -1318,7 +1318,9 @@ async function highLevelSearchOpportunities(client, { contactIdValue = "", dateS
 async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "" }) {
   const messages = [];
   let cursor = "";
-  for (let page = 0; page < 3; page += 1) {
+  const maxPages = 20;
+  const pageLimit = 100;
+  for (let page = 0; page < maxPages; page += 1) {
     const payload = await highLevelRequest(client, {
       method: "GET",
       endpointPath: "/conversations/messages/export",
@@ -1327,6 +1329,8 @@ async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "
         startDate: dateStart ? `${dateStart}T00:00:00.000Z` : "",
         endDate: dateEnd ? `${dateEnd}T23:59:59.999Z` : "",
         channel,
+        limit: pageLimit,
+        pageLimit,
         cursor
       }
     });
