@@ -758,7 +758,14 @@ function normalizeReviewStatus(classification) {
 }
 
 function hasValidAiClassification(parsed) {
-  return Boolean(parsed && normalizeBlastClassification(parsed.classification));
+  if (!parsed || typeof parsed !== "object") return false;
+  if (Boolean(normalizeBlastClassification(parsed.classification))) return true;
+  for (const value of Object.values(parsed)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if (normalizeBlastClassification(value.classification)) return true;
+    }
+  }
+  return false;
 }
 
 function clampConfidence(value) {
@@ -803,11 +810,27 @@ function extractChatCompletionText(payload) {
   return "";
 }
 
+function flattenAiClassificationObject(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
+  if (obj.classification) return obj;
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === "object" && !Array.isArray(value) && value.classification) {
+      return value;
+    }
+  }
+  return obj;
+}
+
 function extractChatCompletionJson(payload) {
   const message = payload?.choices?.[0]?.message || {};
-  if (message.parsed && typeof message.parsed === "object") return message.parsed;
+  if (message.parsed && typeof message.parsed === "object") return flattenAiClassificationObject(message.parsed);
   if (message.refusal) return null;
-  return parseJsonObject(extractChatCompletionText(payload));
+  const content = message.content;
+  if (content && typeof content === "object" && !Array.isArray(content)) {
+    return flattenAiClassificationObject(content);
+  }
+  const parsed = parseJsonObject(extractChatCompletionText(payload));
+  return parsed ? flattenAiClassificationObject(parsed) : null;
 }
 
 function parseJsonObject(text) {
@@ -994,11 +1017,21 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
         signal: AbortSignal.timeout(15000)
       });
       if (!response.ok) {
+        const errorText = await response.text();
+        const parsed = parseJsonObject(errorText);
+        const detail = sanitizeApiDetail(parsed?.error?.message || errorText);
         const error = new Error(`${aiProviderLabel} classification failed with ${response.status}`);
-        error.fallbackReason = await openAiErrorReason(response);
+        const suffix = detail ? ` ${detail}` : "";
+        if (response.status === 400) error.fallbackReason = `${aiProviderLabel} rejected the classification request.${suffix}`;
+        else if (response.status === 401) error.fallbackReason = `${aiProviderLabel} API key was rejected.`;
+        else if (response.status === 404) error.fallbackReason = `${aiProviderLabel} model was not found.${suffix}`;
+        else if (response.status === 429) error.fallbackReason = `${aiProviderLabel} returned a 429 limit response.${suffix}`;
+        else if (response.status >= 500) error.fallbackReason = `${aiProviderLabel} API returned a server error.`;
+        else error.fallbackReason = `${aiProviderLabel} request failed with status ${response.status}.${suffix}`;
         throw error;
       }
-      const data = await response.json();
+      const rawText = await response.text();
+      const data = parseJsonMaybe(rawText);
       return extractChatCompletionJson(data);
     };
 
@@ -1011,6 +1044,22 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
 
     const relaxedParsed = await requestOpenRouter(relaxedBody);
     if (hasValidAiClassification(relaxedParsed)) return relaxedParsed;
+
+    const plainBody = {
+      model: openAiModel,
+      messages: [
+        { role: "system", content: blastReplyRelaxedSystemPrompt() },
+        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
+      ],
+      temperature: 0,
+      max_tokens: 250
+    };
+    try {
+      const plainParsed = await requestOpenRouter(plainBody);
+      if (hasValidAiClassification(plainParsed)) return plainParsed;
+    } catch {
+      // ignore plain text failure, throw the classification error below
+    }
     throw invalidAiClassificationError();
   }
 
