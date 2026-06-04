@@ -1053,10 +1053,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       }
       const rawText = await response.text();
       const data = parseJsonMaybe(rawText);
-      const extracted = extractChatCompletionJson(data);
-      const msg = data?.choices?.[0]?.message;
-      console.error("[AI-DIAG] full message:", JSON.stringify(msg).slice(0, 800));
-      return extracted;
+      return extractChatCompletionJson(data);
     };
 
     try {
