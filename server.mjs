@@ -615,7 +615,9 @@ function messageText(message) {
 }
 
 function messageContactId(message) {
-  return valueText(message, ["contactId", "contact_id", "contactID"]);
+  return valueText(message, ["contactId", "contact_id", "contactID"]) ||
+    valueText(message.contact || {}, ["id", "contactId", "contact_id", "_id"]) ||
+    valueText(message.conversation || {}, ["contactId", "contact_id", "contactID"]);
 }
 
 function contactId(contact) {
@@ -1078,6 +1080,25 @@ function latestMessageForContact(messages, contactId, { inboundOnly = false } = 
     .sort((a, b) => timestampOf(b) - timestampOf(a))[0];
 }
 
+function latestInboundMessage(messages) {
+  return [...messages]
+    .reverse()
+    .find((message) => isInboundMessage(message));
+}
+
+function threadMessageForAi(message) {
+  return {
+    direction: messageDirectionLabel(message),
+    time: messageTimestamp(message),
+    channel: messageChannel(message) || valueText(message, ["type", "messageType", "message_type"]) || "",
+    text: messageText(message)
+  };
+}
+
+function threadMessagesForAi(messages) {
+  return messages.slice(-12).map(threadMessageForAi);
+}
+
 function blastThreadForContact(messages, contactIdValue, messagePhrase) {
   const contactMessages = messages
     .filter((message) => messageContactId(message) === contactIdValue)
@@ -1086,32 +1107,40 @@ function blastThreadForContact(messages, contactIdValue, messagePhrase) {
     return { thread: [], latest: undefined, blastFound: false };
   }
 
+  const usableMessages = contactMessages.filter((message) => {
+    const text = messageText(message);
+    return text || isCallMessage(message) || isInboundMessage(message) || isOutboundMessage(message);
+  });
+  const fallbackLatest = latestInboundMessage(usableMessages) || latestMessageForContact(messages, contactIdValue, { inboundOnly: true });
+  const fallbackMessages = usableMessages.length ? usableMessages : fallbackLatest ? [fallbackLatest] : [];
   const phrase = String(messagePhrase || "").trim().toLowerCase();
-  const blastMessage = phrase
-    ? [...contactMessages]
+  if (phrase) {
+    const blastMessages = [...usableMessages]
       .reverse()
-      .find((message) => isOutboundMessage(message) && messageText(message).toLowerCase().includes(phrase))
-    : undefined;
-  const blastTimestamp = blastMessage ? timestampOf(blastMessage) : 0;
-  const postBlastMessages = contactMessages
-    .filter((message) => !blastTimestamp || timestampOf(message) >= blastTimestamp)
-    .filter((message) => {
-      const text = messageText(message);
-      return text || isCallMessage(message);
-    })
-    .slice(-12);
+      .filter((message) => isOutboundMessage(message) && messageText(message).toLowerCase().includes(phrase));
 
-  const latest = [...postBlastMessages]
-    .reverse()
-    .find((message) => isInboundMessage(message));
-  const thread = postBlastMessages.map((message) => ({
-    direction: messageDirectionLabel(message),
-    time: messageTimestamp(message),
-    channel: messageChannel(message) || valueText(message, ["type", "messageType", "message_type"]) || "",
-    text: messageText(message)
-  }));
+    for (const blastMessage of blastMessages) {
+      const blastTimestamp = timestampOf(blastMessage);
+      const postBlastMessages = usableMessages.filter((message) => {
+        const messageTimestampValue = timestampOf(message);
+        return !blastTimestamp || !messageTimestampValue || messageTimestampValue >= blastTimestamp;
+      });
+      const latest = latestInboundMessage(postBlastMessages);
+      if (latest) {
+        return {
+          thread: threadMessagesForAi(postBlastMessages),
+          latest,
+          blastFound: true
+        };
+      }
+    }
+  }
 
-  return { thread, latest, blastFound: Boolean(blastMessage) };
+  return {
+    thread: threadMessagesForAi(fallbackMessages),
+    latest: fallbackLatest,
+    blastFound: false
+  };
 }
 
 function countMissedCalls(messages) {
@@ -1506,14 +1535,14 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
 async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase }) {
   const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag, limit: 100, createdDateFilter: false });
   const messages = await highLevelExportMessages(client, { dateStart, dateEnd });
-  const contactIds = new Set(contacts.map((contact) => String(contact.id || contact.contactId || "")));
+  const contactIds = new Set(contacts.map((contact) => contactId(contact)));
   const contactsWithInboundReplies = contacts
     .map((contact) => {
-      const contactId = String(contact.id || contact.contactId || "");
-      const context = blastThreadForContact(messages, contactId, messagePhrase);
+      const contactIdValue = contactId(contact);
+      const context = blastThreadForContact(messages, contactIdValue, messagePhrase);
       return {
         contact,
-        contactId,
+        contactId: contactIdValue,
         latest: context.latest,
         thread: context.thread,
         blastFound: context.blastFound
@@ -1561,8 +1590,9 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
   const fallbackReasons = [...new Set(replies.map((reply) => reply.analysisNote).filter(Boolean))];
   const fallbackReasonSummary = fallbackReasons.length ? ` Reason: ${fallbackReasons.slice(0, 2).join(" ")}` : "";
   const blastContextMatches = replies.filter((reply) => reply.blastContextMatched).length;
+  const selectedWindowFallbacks = replies.length - blastContextMatches;
   const threadSummary = messagePhrase
-    ? `${blastContextMatches} reply thread(s) were anchored to the matching blast phrase.`
+    ? `${blastContextMatches} reply thread(s) were anchored to the matching blast phrase and ${selectedWindowFallbacks} used the selected-window conversation fallback.`
     : "AI used bounded conversation messages in the selected date window because no blast phrase was provided.";
 
   return {
