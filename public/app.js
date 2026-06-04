@@ -128,7 +128,7 @@ async function api(path, options = {}) {
     return payload;
   } catch (error) {
     if (error.fromServer) throw error;
-    return localApi(path, options, error);
+    throw new Error("Could not reach the app server. Saved clients and routing setup were not loaded.");
   }
 }
 
@@ -599,6 +599,30 @@ function renderClients() {
     <div class="grid">
       <section class="panel">
         <div class="panel-header">
+          <div><h2>Clients</h2><p>${state.clients.length} configured account${state.clients.length === 1 ? "" : "s"}</p></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Client</th><th>Location ID</th><th>Automation flow</th><th>HighLevel token</th><th>ClickUp task</th><th>Updated</th><th>Connection</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="7"><div class="empty">Add your first client to start running Lead Hero health checks.</div></td></tr>`}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div><h2>System status</h2><p>Read-only integration state from server-side configuration.</p></div>
+        </div>
+        <div class="grid six">
+          ${metricCard("HighLevel API", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
+          ${metricCard("ClickUp", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "Comment posting enabled" : "Set CLICKUP_API_TOKEN for live posting")}
+          ${metricCard("AI", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} / ${state.settings.openAiModel || "model"}` : "Set AI key for blast classification")}
+          ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Production storage" : "Local development storage")}
+          ${metricCard("Auth", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth" : "Auth disabled locally")}
+          ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
           <div><h2>${escapeHtml(formTitle)}</h2><p>${escapeHtml(formSubtitle)}</p></div>
         </div>
         <form id="client-form" class="grid">
@@ -645,30 +669,6 @@ function renderClients() {
             <thead><tr><th>Client</th><th>Staff contact</th><th>Phone</th><th>Phrase</th><th>Delay</th><th>Status</th></tr></thead>
             <tbody>${routingRows || `<tr><td colspan="6"><div class="empty">No routing setup has been added for this client yet.</div></td></tr>`}</tbody>
           </table>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
-          <div><h2>Clients</h2><p>${state.clients.length} configured account${state.clients.length === 1 ? "" : "s"}</p></div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Client</th><th>Location ID</th><th>Automation flow</th><th>HighLevel token</th><th>ClickUp task</th><th>Updated</th><th>Connection</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="7"><div class="empty">Add your first client to start running Lead Hero health checks.</div></td></tr>`}</tbody>
-          </table>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
-          <div><h2>System status</h2><p>Read-only integration state from server-side configuration.</p></div>
-        </div>
-        <div class="grid six">
-          ${metricCard("HighLevel API", state.settings.highLevelApiVersion || "2021-07-28", "Configured server default")}
-          ${metricCard("ClickUp", state.settings.clickupConnected ? "Connected" : "Local preview", state.settings.clickupConnected ? "Comment posting enabled" : "Set CLICKUP_API_TOKEN for live posting")}
-          ${metricCard("AI", state.settings.aiConnected ? "Connected" : "Rules fallback", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} / ${state.settings.openAiModel || "model"}` : "Set AI key for blast classification")}
-          ${metricCard("Storage", state.settings.storage || "Local", state.settings.storage === "Supabase" ? "Production storage" : "Local development storage")}
-          ${metricCard("Auth", state.settings.authRequired ? "Required" : "Local dev", state.settings.authRequired ? "Supabase Auth" : "Auth disabled locally")}
-          ${metricCard("Safe mode", state.settings.safeMode ? "Enabled" : "Disabled", "HighLevel writes are not implemented")}
         </div>
       </section>
     </div>
