@@ -1,4 +1,5 @@
 data/store.json
+data/jobs/
 work/*.log
 work/*.png
 node_modules/

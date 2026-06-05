@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const storePath = path.join(dataDir, "store.json");
+const jobsDir = path.join(dataDir, "jobs");
 const port = Number(process.env.PORT || 5173);
 const highLevelBaseUrl = process.env.HIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com";
 const defaultHighLevelApiVersion = process.env.HIGHLEVEL_API_VERSION || "2021-07-28";
@@ -133,6 +134,20 @@ async function writeStore(store) {
   if (supabaseConfigured) return writeSupabaseStore(store);
   await mkdir(dataDir, { recursive: true });
   await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+async function writeJob(jobId, data) {
+  await mkdir(jobsDir, { recursive: true });
+  await writeFile(path.join(jobsDir, `${jobId}.json`), JSON.stringify(data), "utf8");
+}
+
+async function readJob(jobId) {
+  try {
+    const raw = await readFile(path.join(jobsDir, `${jobId}.json`), "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 function publicClient(client) {
@@ -1711,7 +1726,7 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
   };
 }
 
-async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase }) {
+async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase, onProgress }) {
   const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag, limit: 100, createdDateFilter: false });
   const messages = await highLevelExportMessages(client, { dateStart, dateEnd });
   const contactIds = new Set(contacts.map((contact) => contactId(contact)));
@@ -1728,9 +1743,14 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
       };
     })
     .filter((item) => item.latest);
+  const total = Math.min(contactsWithInboundReplies.length, 50);
+  if (onProgress) await onProgress({ done: 0, total });
+  let progressDone = 0;
   const replies = await mapWithConcurrency(contactsWithInboundReplies.slice(0, 50), 5, async ({ contact, contactId, latest, thread, blastFound }) => {
     const text = latest ? messageText(latest) : "";
     const analysis = await classifyBlastReplyWithAi({ text, phrase: messagePhrase, thread, isCallReply: isCallMessage(latest) });
+    progressDone++;
+    if (onProgress) await onProgress({ done: progressDone, total });
     return {
       id: crypto.randomUUID(),
       contactId,
@@ -1798,6 +1818,22 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     replies,
     createdAt: new Date().toISOString()
   };
+}
+
+async function runBlastJob(jobId, params) {
+  try {
+    await writeJob(jobId, { status: "running", progress: { done: 0, total: 0 } });
+    const analysis = await generateLiveBlastAnalysis({
+      ...params,
+      onProgress: (progress) => writeJob(jobId, { status: "running", progress })
+    });
+    const freshStore = await readStore();
+    freshStore.blastAnalyses.unshift(analysis);
+    await writeStore(freshStore);
+    await writeJob(jobId, { status: "done", progress: { done: analysis.replies.length, total: analysis.replies.length }, analysis });
+  } catch (error) {
+    await writeJob(jobId, { status: "error", error: error.detail || error.message || "Blast analysis failed.", progress: { done: 0, total: 0 } }).catch(() => {});
+  }
 }
 
 function summaryForClassification(classification, phrase) {
@@ -2256,34 +2292,37 @@ async function handleApi(req, res, pathname) {
     if (!body.dateStart || !body.dateEnd || !body.replyTag) {
       return json(res, 400, { error: "Client, date range, and reply tag are required." });
     }
-    let analysis;
-    try {
-      analysis = client.tokenCiphertext
-        ? await generateLiveBlastAnalysis({
-          client,
-          dateStart: body.dateStart,
-          dateEnd: body.dateEnd,
-          replyTag: body.replyTag,
-          workflowName: body.workflowName || "",
-          messagePhrase: body.messagePhrase || ""
-        })
-        : generateBlastAnalysis({
-          client,
-          dateStart: body.dateStart,
-          dateEnd: body.dateEnd,
-          replyTag: body.replyTag,
-          workflowName: body.workflowName || "",
-          messagePhrase: body.messagePhrase || ""
-        });
-    } catch (error) {
-      return json(res, error.status || 502, {
-        error: "HighLevel blast analysis failed.",
-        detail: error.detail || "The read-only HighLevel data pull could not complete."
+    if (client.tokenCiphertext) {
+      const jobId = crypto.randomUUID();
+      runBlastJob(jobId, {
+        client,
+        dateStart: body.dateStart,
+        dateEnd: body.dateEnd,
+        replyTag: body.replyTag,
+        workflowName: body.workflowName || "",
+        messagePhrase: body.messagePhrase || ""
       });
+      return json(res, 202, { jobId });
     }
+    const analysis = generateBlastAnalysis({
+      client,
+      dateStart: body.dateStart,
+      dateEnd: body.dateEnd,
+      replyTag: body.replyTag,
+      workflowName: body.workflowName || "",
+      messagePhrase: body.messagePhrase || ""
+    });
     store.blastAnalyses.unshift(analysis);
     await writeStore(store);
     return json(res, 200, { analysis, blastAnalyses: store.blastAnalyses });
+  }
+
+  if (req.method === "GET" && pathname.startsWith("/api/blasts/job/")) {
+    const jobId = pathname.slice("/api/blasts/job/".length);
+    if (!jobId) return json(res, 400, { error: "Job ID is required." });
+    const job = await readJob(jobId);
+    if (!job) return json(res, 404, { error: "Job not found." });
+    return json(res, 200, job);
   }
 
   if (req.method === "POST" && pathname === "/api/monthly/run") {

@@ -31,6 +31,7 @@ const state = {
   activeBlastAnalysisId: "",
   activeBlastAnalysis: null,
   blastResultsCleared: false,
+  blastJob: null,
   toast: ""
 };
 
@@ -766,6 +767,37 @@ function renderClients() {
   });
 }
 
+function pollBlastJob(jobId) {
+  const interval = setInterval(async () => {
+    try {
+      const job = await api(`/api/blasts/job/${jobId}`);
+      const progressEl = document.querySelector("#blast-job-progress");
+      if (progressEl && job.status === "running" && job.progress.total > 0) {
+        progressEl.textContent = `Classifying contacts... ${job.progress.done} of ${job.progress.total}`;
+      }
+      if (job.status === "done") {
+        clearInterval(interval);
+        state.blastJob = null;
+        state.activeBlastAnalysis = job.analysis;
+        state.blastAnalyses = newestFirstByCreatedAt([
+          job.analysis,
+          ...(state.blastAnalyses || []).filter((item) => item.id !== job.analysis.id)
+        ]);
+        state.activeBlastAnalysisId = job.analysis.id;
+        if (state.active === "blast") render();
+        showToast("Live HighLevel blast analysis saved.");
+      } else if (job.status === "error") {
+        clearInterval(interval);
+        state.blastJob = null;
+        if (state.active === "blast") render();
+        showToast(job.error || "Blast analysis failed.");
+      }
+    } catch {
+      // ignore transient poll errors
+    }
+  }, 3000);
+}
+
 function renderBlast() {
   const savedBlastAnalyses = newestFirstByCreatedAt(state.blastAnalyses);
   const latest = state.blastResultsCleared
@@ -806,10 +838,13 @@ function renderBlast() {
             <div class="field"><label>Optional workflow name or ID</label><input name="workflowName" placeholder="BLAST - May Offer"></div>
             <div class="field"><label>Optional blast message phrase</label><input name="messagePhrase" placeholder="Offer, event, or message phrase"></div>
           </div>
-          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length ? "" : "disabled"}>${icons.play} Run analysis</button></div>
+          <div class="actions"><button class="btn primary" type="submit" ${state.clients.length && !state.blastJob ? "" : "disabled"}>${icons.play} ${state.blastJob ? "Running..." : "Run analysis"}</button></div>
         </form>
       </section>
-      ${latest ? renderBlastResult(latest, rows, clearAction) : `<div class="empty">${state.blastResultsCleared ? "No blast analysis is loaded. Run analysis to show fresh results." : "No blast analysis has been run yet."}</div>`}
+      ${state.blastJob
+        ? `<section class="panel"><div class="panel-header"><div><h2>Analysis in progress</h2><p id="blast-job-progress">${state.blastJob.progress.total > 0 ? `Classifying contacts... ${state.blastJob.progress.done} of ${state.blastJob.progress.total}` : "Fetching contacts from HighLevel..."}</p></div></div></section>`
+        : latest ? renderBlastResult(latest, rows, clearAction) : `<div class="empty">${state.blastResultsCleared ? "No blast analysis is loaded. Run analysis to show fresh results." : "No blast analysis has been run yet."}</div>`
+      }
     </div>
   `, "Blast Analyzer", "Analyze blast replies independently from the monthly maintenance check.");
 
@@ -820,13 +855,19 @@ function renderBlast() {
       state.blastResultsCleared = false;
       state.activeBlastAnalysis = null;
       const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
-      state.activeBlastAnalysis = payload.analysis;
-      state.blastAnalyses = newestFirstByCreatedAt([
-        payload.analysis,
-        ...(payload.blastAnalyses || []).filter((item) => item.id !== payload.analysis.id)
-      ]);
-      state.activeBlastAnalysisId = payload.analysis.id;
-      showToast(`${payload.analysis.source === "live" ? "Live HighLevel" : "Sample"} blast analysis saved.`);
+      if (payload.jobId) {
+        state.blastJob = { jobId: payload.jobId, status: "running", progress: { done: 0, total: 0 } };
+        render();
+        pollBlastJob(payload.jobId);
+      } else {
+        state.activeBlastAnalysis = payload.analysis;
+        state.blastAnalyses = newestFirstByCreatedAt([
+          payload.analysis,
+          ...(payload.blastAnalyses || []).filter((item) => item.id !== payload.analysis.id)
+        ]);
+        state.activeBlastAnalysisId = payload.analysis.id;
+        showToast(`${payload.analysis.source === "live" ? "Live HighLevel" : "Sample"} blast analysis saved.`);
+      }
     } catch (error) {
       showToast(errorMessage(error));
     }
