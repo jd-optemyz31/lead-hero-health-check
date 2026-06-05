@@ -91,8 +91,11 @@ Current MVP implementation:
 - OpenAI direct uses the Responses API.
 - OpenRouter uses the OpenAI-compatible Chat Completions API at `https://openrouter.ai/api/v1/chat/completions`.
 - `AI_PROVIDER`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
+- API key values are trimmed on read to guard against whitespace that Railway or other secret managers may append.
 - The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus` where the provider can route those parameters.
-- In OpenRouter mode, if no endpoint can handle the strict structured-output parameters, or if the strict response does not contain a valid classification, the server retries once with a simpler JSON-only chat request before falling back to local rules.
+- In OpenRouter mode, the server makes up to three attempts before falling back to local rules: (1) strict JSON schema request with `require_parameters: true`; (2) relaxed `json_object` request if the strict attempt fails due to provider routing; (3) plain-text request with no `response_format` if the relaxed attempt returns an unrecognizable response.
+- `max_tokens` is set to `1500` to accommodate reasoning models that output chain-of-thought before the final JSON answer. Models that use a `reasoning` or `reasoning_details` field and return `content: null` are handled by extracting classification from the reasoning text as a last resort.
+- The server handles response payloads where `message.content` is already a parsed object rather than a JSON string, and unwraps one level of nesting if the model wraps its response in a container key such as `{ "result": { "classification": ... } }`.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - The server normalizes common AI label variants, such as lowercase labels, `opt_out`, and `needs_review`, into the approved labels before saving or displaying results.
 - If the AI provider returns a partial response with no valid classification label, the server must reject that AI result and mark the row as rules fallback instead of displaying a mixed AI/fallback row.
@@ -510,6 +513,20 @@ For live blast analysis, do not use contact creation date as the primary date fi
 When the server uses HighLevel contact search with a reply-tag filter, it should trust the server-side tag match if HighLevel returns contact rows without tag details. If the tag-filtered search returns no rows or fails, the server may retry a read-only unfiltered contact search and apply local tag matching only when tag metadata is present in the returned contacts.
 
 Message export pagination must be deep enough for the selected date window. The server should request larger read-only export pages where supported and continue through bounded cursors so replies are not missed just because newer account messages appear later in the selected range.
+
+### Async Blast Analysis (Background Job Pattern)
+
+Live blast analysis runs as a background job to avoid HTTP timeout issues with large contact sets.
+
+Flow:
+
+1. `POST /api/blasts/run` validates the request, generates a UUID job ID, writes an initial job file to `data/jobs/{jobId}.json` with `status: "running"`, fires `runBlastJob()` without awaiting it, and returns `{ jobId }` with HTTP 202 immediately.
+2. `runBlastJob()` runs `generateLiveBlastAnalysis()` in the background with an `onProgress` callback. After each contact is classified, it overwrites the job file with updated progress: `{ status: "running", progress: { done: N, total: M } }`.
+3. When all contacts are processed, `runBlastJob()` saves the completed analysis to the store and writes the final job file: `{ status: "done", progress: { done: M, total: M }, analysis: { ... } }`. On error, it writes `{ status: "error", error: "message", progress: ... }`.
+4. `GET /api/blasts/job/:jobId` reads and returns the current job file contents.
+5. The frontend polls this endpoint every 3 seconds. It updates the progress text in the DOM directly during polling to avoid full page re-renders. When `status === "done"`, it stops polling, saves the analysis to state, and re-renders the blast view with results. When `status === "error"`, it stops polling and shows the error toast.
+
+Job files are stored in `data/jobs/` and are excluded from git. On Railway, the ephemeral filesystem means job files persist only for the current deployment. Sample analyses (no HighLevel token) remain synchronous and return `{ analysis, blastAnalyses }` directly.
 
 ### clickupPostingService
 

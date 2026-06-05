@@ -498,6 +498,16 @@ Long-running checks should show step progress:
 - Analyzing blast replies
 - Generating report
 
+### Blast Analyzer Async Progress
+
+Because live blast analysis runs as a background job, the Blast Analyzer has its own in-progress state:
+
+- After submitting the form, the Run Analysis button changes to "Running..." and becomes disabled.
+- A panel replaces the results area showing "Fetching contacts from HighLevel..." while the server pulls HighLevel data.
+- Once contacts are fetched, the panel updates to "Classifying contacts... X of Y" and counts up as each contact is classified.
+- When the job completes, the results appear automatically and the button re-enables.
+- If the job errors, an error toast is shown and the button re-enables.
+
 ## Validation Rules
 
 - Client name is required.

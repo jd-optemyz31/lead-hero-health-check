@@ -41,6 +41,12 @@ Admins can edit client connection details, including timezone and automation-flo
 
 Blast Analyzer can use OpenAI directly or through OpenRouter from the server only when an approved AI key is configured. OpenRouter mode uses `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and an OpenRouter model ID such as `openai/gpt-5.4-nano`. Results are presented as summary cards plus a reply table with classification, confidence, summary, evidence, method, and review status. AI should classify reply intent semantically rather than by a fixed phrase list. For live analysis, AI receives only bounded post-blast conversation context for the matching contact, not full conversation history. If AI is unavailable, the tool uses rules fallback; if AI cannot explicitly determine intent or the reply is a call record, it marks the reply as `Needs review`.
 
+The server makes up to three classification attempts per contact: (1) strict JSON schema, (2) relaxed json_object, (3) plain text. Reasoning models that return `content: null` are handled by extracting classification from the `reasoning` field. `max_tokens` is set to 1500 to give reasoning models enough budget to output their answer after thinking.
+
+## Async Blast Analysis Decision
+
+Live blast analysis runs as a background job. `POST /api/blasts/run` returns `{ jobId }` immediately. The frontend polls `GET /api/blasts/job/:jobId` every 3 seconds and shows a live progress counter while contacts are being classified. This eliminates HTTP timeout failures for large contact sets. Sample analyses remain synchronous.
+
 ## Brand Direction
 
 The frontend specification uses the Lead Hero logo theme: gold accents, white/light working surfaces, soft silver-gray borders, and dark charcoal structure.

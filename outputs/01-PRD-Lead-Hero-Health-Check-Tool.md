@@ -291,12 +291,14 @@ Next Month Focus:
 3. User selects date range.
 4. User enters reply tag, such as `Replied to Blast`.
 5. User optionally selects workflow name/ID or message phrase.
-6. Tool finds matching contacts and conversations.
-7. Tool classifies replies with AI when `OPENAI_API_KEY` is configured, otherwise it uses the built-in rules fallback.
-8. User saves the blast analysis.
-9. Saved blast analyses appear newest first with saved date and time.
-10. User can clear the currently displayed analysis from the Blast Analyzer screen without deleting it from storage.
-11. Saved blast analysis can later be attached to a monthly report.
+6. User clicks Run Analysis. For live HighLevel clients, the server starts a background job and returns a job ID immediately. The button changes to "Running..." and the results area shows an in-progress panel.
+7. The frontend polls the job status every 3 seconds. The progress panel updates to show "Classifying contacts... X of Y" as each contact is classified.
+8. Tool finds matching contacts and conversations.
+9. Tool classifies replies with AI when `OPENROUTER_API_KEY` or `OPENAI_API_KEY` is configured, otherwise it uses the built-in rules fallback.
+10. When the job completes, results appear automatically and are saved. The Run Analysis button becomes active again.
+11. Saved blast analyses appear newest first with saved date and time.
+12. User can clear the currently displayed analysis from the Blast Analyzer screen without deleting it from storage.
+13. Saved blast analysis can later be attached to a monthly report.
 
 For live HighLevel checks, the reply tag identifies the candidate contacts, but the selected date range should apply to inbound conversation messages. Older contacts who reply during the selected blast window should still be included.
 
