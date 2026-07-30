@@ -5,12 +5,38 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 
+import {
+  canAccessClientId,
+  canAccessJob,
+  hasMinimumRole,
+  scopedClientIds
+} from "./src/access-control.mjs";
+import {
+  isSupportedAppRole,
+  isPendingAdminUserRoleMigration,
+  manualUserCreationValidationError,
+  managedPasswordResetValidationError,
+  normalizeAppRole,
+  safeManagedUser,
+  selfPasswordChangeValidationError,
+  validateManagedUserMutation
+} from "./src/auth-management.mjs";
+import { safeAuditMessage } from "./src/audit.mjs";
+import {
+  applyBlastClassificationGuards,
+  blastContactAnalysisState,
+  classifyConversationByRules,
+  contactDndStatus,
+  selectAnchoredBlastThread
+} from "./src/blast-thread.mjs";
+import { collectPagedHighLevelItems, dailyUtcWindows } from "./src/highlevel-pagination.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const storePath = path.join(dataDir, "store.json");
 const jobsDir = path.join(dataDir, "jobs");
-const port = Number(process.env.PORT || 5173);
+const port = Number(process.env.PORT || 3000);
 const highLevelBaseUrl = process.env.HIGHLEVEL_API_BASE_URL || "https://services.leadconnectorhq.com";
 const defaultHighLevelApiVersion = process.env.HIGHLEVEL_API_VERSION || "2021-07-28";
 const configuredAiBaseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE_URL || process.env.AI_BASE_URL || "";
@@ -40,6 +66,13 @@ const adminEmails = new Set(
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
 );
+const securityAuditActions = [
+  "auth.login",
+  "auth.password_change",
+  "auth.password_reset",
+  "user.create",
+  "user.update"
+];
 const highLevelReadAllowlist = new Set([
   "GET /contacts/",
   "POST /contacts/search",
@@ -77,12 +110,6 @@ const mimeTypes = {
   ".jpeg": "image/jpeg",
   ".svg": "image/svg+xml; charset=utf-8",
   ".ico": "image/x-icon"
-};
-
-const roleRank = {
-  viewer: 1,
-  operator: 2,
-  admin: 3
 };
 
 function normalizeAiProvider(provider) {
@@ -123,15 +150,17 @@ async function ensureStore() {
   }
 }
 
-async function readStore() {
-  if (supabaseConfigured) return readSupabaseStore();
+async function readStore(user) {
+  if (supabaseConfigured) return readSupabaseStore(user);
   await ensureStore();
   const raw = await readFile(storePath, "utf8");
   return JSON.parse(raw);
 }
 
 async function writeStore(store) {
-  if (supabaseConfigured) return writeSupabaseStore(store);
+  if (supabaseConfigured) {
+    throw new Error("Whole-store writes are disabled when Supabase is configured.");
+  }
   await mkdir(dataDir, { recursive: true });
   await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
 }
@@ -299,12 +328,48 @@ async function supabaseRest(pathname, { method = "GET", query = {}, body, prefer
   return payload;
 }
 
-async function readSupabaseStore() {
+function emptyStoreSettings() {
+  return {
+    highLevelApiVersion: defaultHighLevelApiVersion,
+    clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
+    aiConnected: Boolean(openAiApiKey),
+    aiProvider,
+    openAiModel,
+    openAiModelWarning,
+    safeMode: true,
+    storage: supabaseConfigured ? "Supabase" : "Local",
+    authRequired
+  };
+}
+
+function uuidFilter(values) {
+  const ids = values.filter((value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value)));
+  return ids.length ? `in.(${ids.join(",")})` : null;
+}
+
+async function readSupabaseStore(user) {
+  const clientScope = scopedClientIds(user, { authRequired });
+  if (Array.isArray(clientScope) && clientScope.length === 0) {
+    return {
+      clients: [],
+      routingSetups: [],
+      blastAnalyses: [],
+      reports: [],
+      settings: emptyStoreSettings()
+    };
+  }
+
+  const filter = Array.isArray(clientScope) ? uuidFilter(clientScope) : null;
+  if (Array.isArray(clientScope) && !filter) {
+    return {
+      clients: [], routingSetups: [], blastAnalyses: [], reports: [], settings: emptyStoreSettings()
+    };
+  }
   const [clients, routingSetups, blastAnalyses, reports] = await Promise.all([
-    supabaseRest("clients", { query: { select: "*", order: "created_at.asc" } }),
-    supabaseRest("routing_setups", { query: { select: "*", order: "created_at.asc" } }),
-    supabaseRest("blast_analyses", { query: { select: "*", order: "created_at.desc" } }),
-    supabaseRest("monthly_reports", { query: { select: "*", order: "created_at.desc" } })
+    supabaseRest("clients", { query: { select: "*", order: "created_at.asc", id: filter || undefined } }),
+    supabaseRest("routing_setups", { query: { select: "*", order: "created_at.asc", client_id: filter || undefined } }),
+    supabaseRest("blast_analyses", { query: { select: "*", order: "created_at.desc", client_id: filter || undefined } }),
+    supabaseRest("monthly_reports", { query: { select: "*", order: "created_at.desc", client_id: filter || undefined } })
   ]);
 
   return {
@@ -312,55 +377,61 @@ async function readSupabaseStore() {
     routingSetups: routingSetups.map(routingFromRow),
     blastAnalyses: blastAnalyses.map(blastFromRow),
     reports: reports.map(reportFromRow),
-    settings: {
-      highLevelApiVersion: defaultHighLevelApiVersion,
-      clickupConnected: Boolean(process.env.CLICKUP_API_TOKEN),
-      aiConnected: Boolean(openAiApiKey),
-      aiProvider,
-      openAiModel,
-      openAiModelWarning,
-      safeMode: true,
-      storage: "Supabase",
-      authRequired
-    }
+    settings: emptyStoreSettings()
   };
 }
 
-async function writeSupabaseStore(store) {
-  const requests = [];
-  if (store.clients?.length) {
-    requests.push(supabaseRest("clients", {
-      method: "POST",
-      query: { on_conflict: "id" },
-      body: store.clients.map(clientToRow),
-      prefer: "resolution=merge-duplicates"
-    }));
+async function upsertSupabaseRecord(table, row) {
+  return supabaseRest(table, {
+    method: "POST",
+    query: { on_conflict: "id" },
+    body: row,
+    prefer: "resolution=merge-duplicates"
+  });
+}
+
+async function persistClient(store, client) {
+  if (supabaseConfigured) return upsertSupabaseRecord("clients", clientToRow(client));
+  return writeStore(store);
+}
+
+async function persistRoutingSetup(store, setup) {
+  if (supabaseConfigured) return upsertSupabaseRecord("routing_setups", routingToRow(setup));
+  return writeStore(store);
+}
+
+async function persistBlastAnalysis(store, analysis) {
+  if (supabaseConfigured) return upsertSupabaseRecord("blast_analyses", blastToRow(analysis));
+  return writeStore(store);
+}
+
+async function persistReport(store, report) {
+  if (supabaseConfigured) return upsertSupabaseRecord("monthly_reports", reportToRow(report));
+  return writeStore(store);
+}
+
+async function writeAuditLog({ authUserId = null, clientId = null, action, targetType = "", targetId = "", status = "success", message = "" }) {
+  if (!supabaseConfigured) return;
+  await supabaseRest("api_audit_logs", {
+    method: "POST",
+    body: {
+      auth_user_id: authUserId || null,
+      client_id: clientId || null,
+      action: String(action || "unknown").slice(0, 120),
+      target_type: String(targetType || "").slice(0, 80),
+      target_id: String(targetId || "").slice(0, 160),
+      status: status === "failure" ? "failure" : "success",
+      message: safeAuditMessage(message)
+    }
+  });
+}
+
+async function recordAudit(event) {
+  try {
+    await writeAuditLog(event);
+  } catch (error) {
+    console.error("Audit logging failed.", error.status || "");
   }
-  if (store.routingSetups?.length) {
-    requests.push(supabaseRest("routing_setups", {
-      method: "POST",
-      query: { on_conflict: "id" },
-      body: store.routingSetups.map(routingToRow),
-      prefer: "resolution=merge-duplicates"
-    }));
-  }
-  if (store.blastAnalyses?.length) {
-    requests.push(supabaseRest("blast_analyses", {
-      method: "POST",
-      query: { on_conflict: "id" },
-      body: store.blastAnalyses.map(blastToRow),
-      prefer: "resolution=merge-duplicates"
-    }));
-  }
-  if (store.reports?.length) {
-    requests.push(supabaseRest("monthly_reports", {
-      method: "POST",
-      query: { on_conflict: "id" },
-      body: store.reports.map(reportToRow),
-      prefer: "resolution=merge-duplicates"
-    }));
-  }
-  await Promise.all(requests);
 }
 
 function encryptionKey() {
@@ -426,9 +497,13 @@ function clearCookie(res, name) {
   setCookie(res, name, "", { maxAge: 0 });
 }
 
-async function supabaseAuth(pathname, { method = "GET", body, token } = {}) {
+async function supabaseAuth(pathname, { method = "GET", body, token, query = {} } = {}) {
   if (!supabaseUrl || !supabaseAnonKey) throw new Error("Supabase Auth is not configured.");
-  const response = await fetch(`${supabaseUrl}/auth/v1/${pathname}`, {
+  const url = new URL(`${supabaseUrl}/auth/v1/${pathname}`);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url, {
     method,
     headers: {
       "apikey": supabaseAnonKey,
@@ -448,13 +523,53 @@ async function supabaseAuth(pathname, { method = "GET", body, token } = {}) {
   return payload;
 }
 
+async function supabaseAdminAuth(pathname, { method = "GET", body, query = {} } = {}) {
+  if (!supabaseConfigured) throw new Error("Supabase Auth administration is not configured.");
+  const url = new URL(`${supabaseUrl}/auth/v1/${pathname}`);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "apikey": supabaseServiceRoleKey,
+      "authorization": `Bearer ${supabaseServiceRoleKey}`,
+      "content-type": "application/json"
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await response.text();
+  const payload = text ? parseJsonMaybe(text) : {};
+  if (!response.ok) {
+    const error = new Error("Supabase Auth administration request failed.");
+    error.status = response.status;
+    error.detail = sanitizeApiDetail(typeof payload === "string" ? payload : payload?.msg || payload?.message || text);
+    throw error;
+  }
+  return payload;
+}
+
 async function loadAppUser(user) {
   const email = String(user.email || "").toLowerCase();
   if (adminEmails.has(email)) {
-    return { id: user.id, email, role: "admin", active: true, source: "ADMIN_EMAILS" };
+    if (supabaseConfigured) {
+      await supabaseRest("app_users", {
+        method: "POST",
+        query: { on_conflict: "auth_user_id" },
+        body: {
+          auth_user_id: user.id,
+          email,
+          role: "admin",
+          active: true,
+          updated_at: new Date().toISOString()
+        },
+        prefer: "resolution=merge-duplicates"
+      });
+    }
+    return { id: user.id, email, role: "admin", active: true, assignedClientIds: [], source: "ADMIN_EMAILS" };
   }
   if (!supabaseConfigured) {
-    return { id: user.id, email, role: "admin", active: true, source: "local" };
+    return { id: user.id, email, role: "admin", active: true, assignedClientIds: [], source: "local" };
   }
   const rows = await supabaseRest("app_users", {
     query: {
@@ -468,8 +583,9 @@ async function loadAppUser(user) {
   return {
     id: appUser.auth_user_id || user.id,
     email: appUser.email || email,
-    role: appUser.role || "viewer",
+    role: normalizeAppRole(appUser.role),
     active: true,
+    assignedClientIds: [],
     source: "app_users"
   };
 }
@@ -488,10 +604,134 @@ async function getCurrentUser(req) {
   }
 }
 
+function validEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : "";
+}
+
+async function getAppUserByAuthId(authUserId) {
+  const rows = await supabaseRest("app_users", {
+    query: {
+      select: "id,auth_user_id,email,role,active,created_at,updated_at",
+      auth_user_id: `eq.${authUserId}`,
+      limit: "1"
+    }
+  });
+  return rows[0] || null;
+}
+
+async function getAuthUserById(authUserId) {
+  const payload = await supabaseAdminAuth(`admin/users/${encodeURIComponent(authUserId)}`);
+  return payload?.user || payload;
+}
+
+async function findAuthUserByEmail(email) {
+  for (let page = 1; page <= 20; page += 1) {
+    const payload = await supabaseAdminAuth("admin/users", {
+      query: { page, per_page: 100 }
+    });
+    const users = Array.isArray(payload?.users) ? payload.users : [];
+    const match = users.find((user) => String(user.email || "").trim().toLowerCase() === email);
+    if (match) return match;
+    if (users.length < 100) return null;
+  }
+  return null;
+}
+
+async function listManagedUsers({ page = 1, perPage = 25 } = {}) {
+  const requestedPage = Math.max(1, Number(page) || 1);
+  const requestedPerPage = Math.min(50, Math.max(1, Number(perPage) || 25));
+  const [authPayload, appUsers] = await Promise.all([
+    supabaseAdminAuth("admin/users", {
+      query: { page: requestedPage, per_page: requestedPerPage + 1 }
+    }),
+    supabaseRest("app_users", {
+      query: {
+        select: "id,auth_user_id,email,role,active,created_at,updated_at",
+        order: "created_at.asc"
+      }
+    })
+  ]);
+  const authUsers = Array.isArray(authPayload?.users) ? authPayload.users : [];
+  const hasMore = authUsers.length > requestedPerPage;
+  const appUsersByAuthId = new Map(appUsers.map((appUser) => [appUser.auth_user_id, appUser]));
+  const users = authUsers.slice(0, requestedPerPage).map((authUser) => {
+    const email = String(authUser.email || "").trim().toLowerCase();
+    return safeManagedUser({
+      authUser,
+      appUser: appUsersByAuthId.get(authUser.id),
+      protectedAdmin: adminEmails.has(email)
+    });
+  });
+  return {
+    users,
+    pagination: {
+      page: requestedPage,
+      perPage: requestedPerPage,
+      hasPrevious: requestedPage > 1,
+      hasMore
+    }
+  };
+}
+
+async function countActiveAdmins() {
+  const rows = await supabaseRest("app_users", {
+    query: {
+      select: "auth_user_id",
+      role: "eq.admin",
+      active: "eq.true"
+    }
+  });
+  return rows.length;
+}
+
+async function signOutAuthToken(token) {
+  if (!token) return;
+  await supabaseAuth("logout", { method: "POST", token }).catch(() => {});
+}
+
+async function verifyCurrentPassword(user, currentPassword) {
+  let verificationPayload = null;
+  try {
+    verificationPayload = await supabaseAuth("token?grant_type=password", {
+      method: "POST",
+      body: {
+        email: user.email,
+        password: currentPassword
+      }
+    });
+    if (verificationPayload?.user?.id !== user.id) {
+      throw new Error("Authenticated identity does not match the current user.");
+    }
+  } catch {
+    const error = new Error("Current password is incorrect.");
+    error.status = 401;
+    throw error;
+  } finally {
+    await signOutAuthToken(verificationPayload?.access_token);
+  }
+}
+
+function auditLogFromRow(row) {
+  return {
+    id: row.id,
+    actorUserId: row.auth_user_id || "",
+    clientId: row.client_id || "",
+    action: row.action || "",
+    targetType: row.target_type || "",
+    targetId: row.target_id || "",
+    status: row.status || "",
+    message: safeAuditMessage(row.message),
+    createdAt: row.created_at
+  };
+}
+
 function canAccess(user, minimumRole) {
-  if (!authRequired) return true;
-  if (!user?.active) return false;
-  return (roleRank[user.role] || 0) >= (roleRank[minimumRole] || 0);
+  return hasMinimumRole(user, minimumRole, { authRequired });
+}
+
+function canAccessClient(user, clientId) {
+  return canAccessClientId(user, clientId, { authRequired });
 }
 
 function forbidden(res, message = "You do not have permission to perform this action.") {
@@ -635,6 +875,10 @@ function messageContactId(message) {
     valueText(message.conversation || {}, ["contactId", "contact_id", "contactID"]);
 }
 
+function messageId(message) {
+  return valueText(message, ["id", "messageId", "message_id", "_id"]);
+}
+
 function contactId(contact) {
   return valueText(contact, ["id", "contactId", "contact_id", "_id"]);
 }
@@ -725,23 +969,6 @@ function hasAttribution(contact) {
   });
 }
 
-function classifyBlastReply(text) {
-  const clean = String(text || "").toLowerCase();
-  if (!clean.trim()) return "Needs review";
-  if (/(stop|unsubscribe|remove me|do not contact|don't contact)/.test(clean)) return "Opt-out";
-  if (/(no thanks|not interested|not now|already have|too expensive|pass|do not need|don't need|no longer interested)/.test(clean)) return "Negative";
-  if (/(yes|interested|send|info|details|tell me more|more about|price|pricing|quote|cost|how much|call me|book|schedule)/.test(clean)) return "Positive";
-  return "Neutral";
-}
-
-function explicitReplyGuardClassification(text) {
-  const clean = String(text || "").toLowerCase();
-  if (!clean.trim()) return null;
-  if (/\b(stop|unsubscribe|remove me|do not contact|don't contact)\b/.test(clean)) return "Opt-out";
-  if (/\b(no thanks|no thank you|not interested|not now|pass|do not need|don't need|no longer interested)\b/.test(clean)) return "Negative";
-  return null;
-}
-
 const blastClassificationLabels = new Set(["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]);
 const blastClassificationAliases = new Map([
   ["positive", "Positive"],
@@ -778,6 +1005,23 @@ function normalizeBlastClassification(value) {
 function normalizeReviewStatus(classification) {
   if (classification === "Needs review") return "Review needed";
   return "Auto-classified";
+}
+
+function normalizeServiceRelevance(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+  const relevanceMap = new Map([
+    ["promoted service", "Promoted service"],
+    ["same service", "Promoted service"],
+    ["different service", "Different service"],
+    ["other service", "Different service"],
+    ["unclear", "Unclear"],
+    ["unknown", "Unclear"]
+  ]);
+  return relevanceMap.get(normalized) || "Unclear";
 }
 
 function hasValidAiClassification(parsed) {
@@ -939,15 +1183,32 @@ function blastReplyJsonSchema() {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["classification", "summary", "evidence", "confidence", "reviewStatus"],
+    required: [
+      "classification",
+      "serviceRelevance",
+      "relevanceReason",
+      "summary",
+      "evidence",
+      "confidence",
+      "reviewStatus"
+    ],
     properties: {
       classification: {
         type: "string",
         enum: ["Positive", "Neutral", "Negative", "Opt-out", "Needs review"]
       },
+      serviceRelevance: {
+        type: "string",
+        enum: ["Promoted service", "Different service", "Unclear"],
+        description: "Whether the customer's expressed interest concerns the service promoted by the matched outbound blast."
+      },
+      relevanceReason: {
+        type: "string",
+        description: "One short sentence explaining the service-relevance decision."
+      },
       summary: {
         type: "string",
-        description: "One short sentence explaining the reply intent."
+        description: "One short sentence explaining the customer's overall post-blast intent."
       },
       evidence: {
         type: "string",
@@ -966,44 +1227,46 @@ function blastReplyJsonSchema() {
 
 function blastReplySystemPrompt() {
   return [
-    "You classify inbound replies to HighLevel blast campaigns for an internal Lead Hero health check.",
+    "You classify the customer's overall intent toward the specific promoted offer across a complete post-blast HighLevel conversation for an internal Lead Hero health check.",
     "Return only structured JSON. Do not recommend sending messages, updating contacts, changing opportunities, or triggering workflows.",
-    "The classification target is the latest inbound customer reply only.",
-    "Blast message text and outbound messages are context only; never classify a reply as Positive because the outbound blast contained an offer.",
-    "If the latest inbound customer reply clearly says they are not interested, the classification must be Negative.",
-    "Use semantic intent, not a fixed keyword list. Customers can express the same intent in many ways.",
-    "Positive means the reply shows interest, asks a buying or service question, asks for next steps, wants details, or indicates willingness to continue.",
-    "Negative means the reply clearly declines, rejects, says they are not a fit, or shows no interest.",
-    "Opt-out means the reply asks not to be contacted or to unsubscribe.",
-    "Neutral means the reply is understandable but does not clearly show interest or rejection.",
-    "Needs review means AI cannot explicitly tell whether it is positive, negative, neutral, or opt-out, the reply text is missing, the reply is contradictory, or the evidence is a call record rather than a text reply.",
-    "The summary and evidence must describe the inbound customer reply, not the outbound blast copy.",
-    "Do not use Needs review when the text clearly supports another label."
+    "The promotedOffer field contains the actual matched outbound blast. The blastAnchorPhrase was used only to locate that outbound message and is not the full offer.",
+    "Treat postBlastConversation as the primary evidence and consider the entire trajectory of inbound customer messages, not only the latest reply.",
+    "Outbound messages provide context and must never be treated as customer intent.",
+    "Use semantic and emotional intelligence rather than a fixed keyword list. Consider questions, hesitation, objections, follow-through, and changes in intent across the conversation.",
+    "Opt-out takes precedence only when an inbound customer message explicitly asks not to be contacted, removed, unsubscribed, or contains a standalone STOP instruction. Normal phrases such as 'stop by tomorrow' are not opt-outs.",
+    "Identify the service or services promoted in promotedOffer, then identify which service or services the customer is discussing.",
+    "Set serviceRelevance to Promoted service when the customer is engaging with a service in the promoted offer, Different service when the customer's only expressed interest concerns another service, and Unclear when the service cannot be determined.",
+    "Positive means the customer shows genuine interest in the promoted service, requests its pricing or details, asks a relevant service question, requests next steps, or indicates willingness to visit, book, or continue for that promoted service.",
+    "Negative means the customer clearly declines or rejects the promoted offer or explicitly says they have no interest in it.",
+    "Neutral means the customer is understandable but shows neither clear acceptance nor clear rejection of the promoted offer. Different-service-only inquiries are Neutral for this blast because they do not accept or reject the promoted offer. Also treat temporary deferrals such as not ready right now or maybe later, acknowledgements such as okay or thanks, and identity questions such as who is this as Neutral unless the wider conversation clearly supports another label.",
+    "Needs review is exceptional. Use it only when there is no usable inbound customer text, the only evidence is a call record without text intent, or the conversation is genuinely irreconcilable after reading all messages.",
+    "Do not use Needs review merely because a message is short, cautious, informal, or requires ordinary contextual judgment.",
+    "The summary, evidence, and relevanceReason must describe the customer's overall post-blast intent without copying sensitive contact data. Evidence must cite inbound customer language, not outbound blast copy."
   ].join(" ");
 }
 
 function blastReplyRelaxedSystemPrompt() {
   return [
     blastReplySystemPrompt(),
-    "Return a single JSON object with exactly these keys: classification, summary, evidence, confidence, reviewStatus.",
+    "Return a single JSON object with exactly these keys: classification, serviceRelevance, relevanceReason, summary, evidence, confidence, reviewStatus.",
     "Do not wrap the JSON in markdown."
   ].join(" ");
 }
 
-function blastReplyUserContent({ text, phrase, thread = [] }) {
-  const messagesAfterBlast = thread.map((message) => ({
+function blastReplyUserContent({ phrase, promotedOffer, thread = [] }) {
+  const postBlastConversation = thread.map((message) => ({
     direction: message.direction,
     time: message.time,
     channel: message.channel,
-    text: truncateForAi(message.text, 700)
+    text: truncateForAi(message.text, 4000)
   }));
-  const inboundCustomerMessages = messagesAfterBlast.filter((message) => message.direction === "inbound");
   return JSON.stringify({
-    task: "Classify the intent of latestInboundCustomerReplyText. Use inboundCustomerMessagesAfterBlast only as supporting context.",
-    blastContext: phrase || "",
-    latestInboundCustomerReplyText: truncateForAi(text),
-    inboundCustomerMessagesAfterBlast: inboundCustomerMessages,
-    contextNote: "Outbound blast text is intentionally not included as a classification signal. Do not classify from the offer wording."
+    task: "Classify the customer's overall intent toward the promotedOffer across the complete postBlastConversation.",
+    payloadFormat: "structured-json",
+    blastAnchorPhrase: phrase || "",
+    promotedOffer: truncateForAi(promotedOffer, 6000),
+    postBlastConversation,
+    contextNote: "The array begins with the matched outbound blast and includes every exported message from that blast onward in the selected date range. Analyze all inbound customer messages together; outbound messages are context only. A different-service-only inquiry is Neutral for this promoted offer because it neither accepts nor rejects the offer."
   });
 }
 
@@ -1018,7 +1281,7 @@ function invalidAiClassificationError() {
   return error;
 }
 
-async function requestAiClassification({ text, phrase, thread = [] }) {
+async function requestAiClassification({ phrase, promotedOffer, thread = [] }) {
   const schema = blastReplyJsonSchema();
   if (aiProvider === "openrouter") {
     const headers = {
@@ -1037,7 +1300,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       model: openAiModel,
       messages: [
         { role: "system", content: blastReplySystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
+        { role: "user", content: blastReplyUserContent({ phrase, promotedOffer, thread }) }
       ],
       response_format: {
         type: "json_schema",
@@ -1055,7 +1318,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       model: openAiModel,
       messages: [
         { role: "system", content: blastReplyRelaxedSystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
+        { role: "user", content: blastReplyUserContent({ phrase, promotedOffer, thread }) }
       ],
       response_format: { type: "json_object" },
       temperature: 0,
@@ -1101,7 +1364,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       model: openAiModel,
       messages: [
         { role: "system", content: blastReplyRelaxedSystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
+        { role: "user", content: blastReplyUserContent({ phrase, promotedOffer, thread }) }
       ],
       temperature: 0,
       max_tokens: 1500
@@ -1125,7 +1388,7 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
       model: openAiModel,
       input: [
         { role: "system", content: blastReplySystemPrompt() },
-        { role: "user", content: blastReplyUserContent({ text, phrase, thread }) }
+        { role: "user", content: blastReplyUserContent({ phrase, promotedOffer, thread }) }
       ],
       text: {
         format: {
@@ -1148,15 +1411,26 @@ async function requestAiClassification({ text, phrase, thread = [] }) {
   return parseJsonObject(extractResponseText(data));
 }
 
-function ruleBasedBlastAnalysis(text, phrase) {
-  const classification = classifyBlastReply(text);
+function summaryForConversation(classification) {
+  const summaries = {
+    Positive: "The post-blast conversation shows customer interest or a request to continue.",
+    Neutral: "The post-blast conversation neither clearly accepts nor rejects the promoted offer, or it concerns a different service.",
+    Negative: "The post-blast conversation clearly declines or rejects the promoted offer.",
+    "Opt-out": "The post-blast conversation contains an explicit request to stop contact.",
+    "Needs review": "The post-blast conversation lacks enough usable customer text for a reliable classification."
+  };
+  return summaries[classification];
+}
+
+function ruleBasedBlastAnalysis(ruleResult) {
+  const classification = ruleResult.classification;
   const confidence = confidenceForClassification(classification);
   return {
     classification,
-    summary: text
-      ? summaryForLatestReply(classification, text)
-      : "Contact matched the reply tag, but no matching message text was found in the exported conversation window.",
-    evidence: text ? sanitizeApiDetail(text) : "",
+    summary: summaryForConversation(classification),
+    evidence: sanitizeApiDetail(ruleResult.evidenceText || ""),
+    serviceRelevance: "Unclear",
+    relevanceReason: "Rule fallback could not reliably determine whether the customer discussed the promoted service.",
     confidence,
     reviewStatus: classification === "Needs review" ? "Review needed" : "Auto-classified",
     analysisMethod: openAiApiKey ? "Rules fallback" : "Rules",
@@ -1175,24 +1449,32 @@ function confidenceForClassification(classification) {
   return confidenceMap[classification] || 0.5;
 }
 
-async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply = false }) {
-  if (isCallReply) {
+async function classifyBlastReplyWithAi({
+  phrase,
+  promotedOffer,
+  thread = [],
+  dndStatus = { isDnd: false, channel: "SMS", source: "none" }
+}) {
+  if (dndStatus.isDnd) {
     return {
-      classification: "Needs review",
-      summary: "Contact replied through a call record, so text intent is not available for automatic positive or negative classification.",
-      evidence: text ? sanitizeApiDetail(text) : "Inbound reply evidence was a call record.",
-      confidence: 0.35,
-      reviewStatus: "Review needed",
-      analysisMethod: openAiApiKey ? "AI" : "Rules",
-      analysisNote: "Call reply requires manual review."
+      classification: "Opt-out",
+      summary: "HighLevel marks this contact as Do Not Disturb for the blast channel.",
+      evidence: `HighLevel reports Do Not Disturb for ${dndStatus.channel}.`,
+      serviceRelevance: "Unclear",
+      relevanceReason: "HighLevel DND takes precedence over offer-relevance classification.",
+      confidence: 0.99,
+      reviewStatus: "Auto-classified",
+      analysisMethod: "HighLevel DND",
+      analysisNote: ""
     };
   }
 
-  if (!openAiApiKey || !text) return ruleBasedBlastAnalysis(text, phrase);
+  const ruleResult = classifyConversationByRules(thread);
+  const fallback = ruleBasedBlastAnalysis(ruleResult);
+  if (!openAiApiKey || ruleResult.classification === "Needs review") return fallback;
 
-  const fallback = ruleBasedBlastAnalysis(text, phrase);
   try {
-    const parsed = await requestAiClassification({ text, phrase, thread });
+    const parsed = await requestAiClassification({ phrase, promotedOffer, thread });
     const classification = normalizeBlastClassification(parsed?.classification);
     if (!classification) {
       const error = new Error(`${aiProviderLabel} returned an invalid classification response.`);
@@ -1202,12 +1484,14 @@ async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply
     const confidence = parsed?.confidence === undefined || parsed?.confidence === null
       ? confidenceForClassification(classification)
       : clampConfidence(parsed.confidence);
-    const guardedClassification = explicitReplyGuardClassification(text);
-    const finalClassification = guardedClassification && guardedClassification !== classification
-      ? guardedClassification
-      : classification;
-    const finalConfidence = guardedClassification && guardedClassification !== classification
-      ? Math.max(confidence, confidenceForClassification(guardedClassification))
+    const serviceRelevance = normalizeServiceRelevance(parsed?.serviceRelevance);
+    const finalClassification = applyBlastClassificationGuards({
+      classification,
+      serviceRelevance,
+      ruleResult
+    });
+    const finalConfidence = finalClassification !== classification
+      ? confidenceForClassification(finalClassification)
       : confidence;
     const reviewStatus = normalizeReviewStatus(finalClassification);
     const adjustedByGuard = finalClassification !== classification;
@@ -1215,14 +1499,25 @@ async function classifyBlastReplyWithAi({ text, phrase, thread = [], isCallReply
     return {
       classification: finalClassification,
       summary: adjustedByGuard
-        ? summaryForLatestReply(finalClassification, text)
+        ? summaryForConversation(finalClassification)
         : sanitizeApiDetail(parsed?.summary || summaryForClassification(finalClassification, phrase)),
-      evidence: sanitizeApiDetail(parsed?.evidence || fallback.evidence || text),
+      evidence: adjustedByGuard
+        ? fallback.evidence
+        : sanitizeApiDetail(parsed?.evidence || fallback.evidence),
+      serviceRelevance,
+      relevanceReason: sanitizeApiDetail(
+        parsed?.relevanceReason
+        || (serviceRelevance === "Different service"
+          ? "The customer discussed a service other than the one promoted in the matched blast."
+          : "The service relationship was not explicitly explained.")
+      ),
       confidence: finalConfidence,
       reviewStatus,
       analysisMethod: adjustedByGuard ? "AI + validation" : "AI",
       analysisNote: adjustedByGuard
-        ? `Adjusted from ${classification} because the latest inbound reply clearly indicates ${finalClassification.toLowerCase()} intent.`
+        ? serviceRelevance === "Different service"
+          ? `Adjusted from ${classification} because the customer discussed only a different service from the promoted offer.`
+          : `Adjusted from ${classification} using the complete-conversation classification policy.`
         : ""
     };
   } catch (error) {
@@ -1269,51 +1564,35 @@ function threadMessageForAi(message) {
   };
 }
 
-function threadMessagesForAi(messages) {
-  return messages.slice(-12).map(threadMessageForAi);
-}
-
 function blastThreadForContact(messages, contactIdValue, messagePhrase) {
   const contactMessages = messages
     .filter((message) => messageContactId(message) === contactIdValue)
     .sort((a, b) => timestampOf(a) - timestampOf(b));
   if (!contactMessages.length) {
-    return { thread: [], latest: undefined, blastFound: false };
+    return {
+      thread: [],
+      latest: undefined,
+      latestCandidate: undefined,
+      matchedBlast: undefined,
+      blastFound: false
+    };
   }
 
   const usableMessages = contactMessages.filter((message) => {
     const text = messageText(message);
     return text || isCallMessage(message) || isInboundMessage(message) || isOutboundMessage(message);
   });
-  const fallbackLatest = latestInboundMessage(usableMessages) || latestMessageForContact(messages, contactIdValue, { inboundOnly: true });
-  const fallbackMessages = usableMessages.length ? usableMessages : fallbackLatest ? [fallbackLatest] : [];
-  const phrase = String(messagePhrase || "").trim().toLowerCase();
-  if (phrase) {
-    const blastMessages = [...usableMessages]
-      .reverse()
-      .filter((message) => isOutboundMessage(message) && messageText(message).toLowerCase().includes(phrase));
-
-    for (const blastMessage of blastMessages) {
-      const blastTimestamp = timestampOf(blastMessage);
-      const postBlastMessages = usableMessages.filter((message) => {
-        const messageTimestampValue = timestampOf(message);
-        return !blastTimestamp || !messageTimestampValue || messageTimestampValue >= blastTimestamp;
-      });
-      const latest = latestInboundMessage(postBlastMessages);
-      if (latest) {
-        return {
-          thread: threadMessagesForAi(postBlastMessages),
-          latest,
-          blastFound: true
-        };
-      }
-    }
-  }
-
+  const result = selectAnchoredBlastThread(usableMessages, {
+    messagePhrase,
+    textOf: messageText,
+    timestampOf,
+    isOutbound: isOutboundMessage,
+    isInbound: isInboundMessage,
+    toThreadMessage: threadMessageForAi
+  });
   return {
-    thread: threadMessagesForAi(fallbackMessages),
-    latest: fallbackLatest,
-    blastFound: false
+    ...result,
+    latestCandidate: latestInboundMessage(usableMessages)
   };
 }
 
@@ -1325,7 +1604,14 @@ function countMissedCalls(messages) {
   }).length;
 }
 
-async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = "", limit = 100, createdDateFilter = true }) {
+async function highLevelSearchContacts(client, {
+  dateStart,
+  dateEnd,
+  replyTag = "",
+  limit = 100,
+  maxPages = 1,
+  createdDateFilter = true
+}) {
   const filters = [];
   if (replyTag) filters.push({ field: "tags", operator: "contains", value: replyTag });
   if (createdDateFilter && dateStart && dateEnd) {
@@ -1339,20 +1625,27 @@ async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = 
     });
   }
 
-  const baseBody = {
-    locationId: client.locationId,
-    page: 1,
-    pageLimit: limit,
-    filters
-  };
-
-  try {
-    const payload = await highLevelRequest(client, {
+  const searchPages = (searchFilters) => collectPagedHighLevelItems({
+    pageSize: limit,
+    maxPages,
+    failOnPageLimit: true,
+    pageLimitErrorMessage: "HighLevel returned more contacts than the Blast Analyzer safety limit. Narrow the account data or increase the reviewed contact-page limit before trusting this run.",
+    itemId: contactId,
+    extractItems: extractContacts,
+    fetchPage: (page, pageSize) => highLevelRequest(client, {
       method: "POST",
       endpointPath: "/contacts/search",
-      body: baseBody
-    });
-    const filteredContacts = filterSearchedContacts(extractContacts(payload), {
+      body: {
+        locationId: client.locationId,
+        page,
+        pageLimit: pageSize,
+        ...(searchFilters.length ? { filters: searchFilters } : {})
+      }
+    })
+  });
+
+  try {
+    const filteredContacts = filterSearchedContacts(await searchPages(filters), {
       dateStart,
       dateEnd,
       replyTag,
@@ -1365,12 +1658,7 @@ async function highLevelSearchContacts(client, { dateStart, dateEnd, replyTag = 
     // or return no rows depending on account response shape.
   }
 
-  const payload = await highLevelRequest(client, {
-    method: "POST",
-    endpointPath: "/contacts/search",
-    body: { locationId: client.locationId, page: 1, pageLimit: limit }
-  });
-  return filterSearchedContacts(extractContacts(payload), {
+  return filterSearchedContacts(await searchPages([]), {
     dateStart,
     dateEnd,
     replyTag,
@@ -1430,26 +1718,53 @@ async function highLevelSearchOpportunities(client, { contactIdValue = "", dateS
 
 async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "" }) {
   const messages = [];
-  let cursor = "";
-  const maxPages = 20;
+  const seenMessageIds = new Set();
+  const maxPagesPerDay = 50;
   const pageLimit = 100;
-  for (let page = 0; page < maxPages; page += 1) {
-    const payload = await highLevelRequest(client, {
-      method: "GET",
-      endpointPath: "/conversations/messages/export",
-      query: {
-        locationId: client.locationId,
-        startDate: dateStart ? `${dateStart}T00:00:00.000Z` : "",
-        endDate: dateEnd ? `${dateEnd}T23:59:59.999Z` : "",
-        channel,
-        limit: pageLimit,
-        pageLimit,
-        cursor
+  const retryableStatuses = new Set([401, 429, 500, 502, 503, 504]);
+
+  for (const window of dailyUtcWindows(dateStart, dateEnd)) {
+    let cursor = "";
+    for (let page = 0; page < maxPagesPerDay; page += 1) {
+      let payload;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          payload = await highLevelRequest(client, {
+            method: "GET",
+            endpointPath: "/conversations/messages/export",
+            query: {
+              locationId: client.locationId,
+              startDate: window.startDate,
+              endDate: window.endDate,
+              channel,
+              limit: pageLimit,
+              pageLimit,
+              cursor
+            }
+          });
+          break;
+        } catch (error) {
+          if (!retryableStatuses.has(Number(error.status)) || attempt === 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+        }
       }
-    });
-    messages.push(...extractMessages(payload));
-    cursor = payload.nextCursor || payload.cursor || payload.meta?.nextCursor || "";
-    if (!cursor) break;
+
+      for (const message of extractMessages(payload)) {
+        const id = messageId(message);
+        if (id && seenMessageIds.has(id)) continue;
+        if (id) seenMessageIds.add(id);
+        messages.push(message);
+      }
+
+      cursor = payload.nextCursor || payload.cursor || payload.meta?.nextCursor || "";
+      if (!cursor) break;
+      if (page === maxPagesPerDay - 1) {
+        const error = new Error("HighLevel message export exceeded the safe daily page limit.");
+        error.status = 422;
+        error.detail = "The selected day contains too many messages to analyze completely. Run a narrower date range.";
+        throw error;
+      }
+    }
   }
   return messages.filter((message) => isWithinDateRange(message, dateStart, dateEnd));
 }
@@ -1712,7 +2027,9 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
     messageType: "SMS",
     estimatedSends: "Not available",
     deliveryRate: "Not available",
+    taggedContactCount: total,
     totalRepliedContacts: total,
+    analyzedContactCount: total,
     positiveCount: positive,
     neutralCount: neutral,
     negativeCount: negative,
@@ -1727,35 +2044,85 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
 }
 
 async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase, onProgress }) {
-  const contacts = await highLevelSearchContacts(client, { dateStart, dateEnd, replyTag, limit: 100, createdDateFilter: false });
+  const contacts = await highLevelSearchContacts(client, {
+    dateStart,
+    dateEnd,
+    replyTag,
+    limit: 100,
+    maxPages: 500,
+    createdDateFilter: false
+  });
   const messages = await highLevelExportMessages(client, { dateStart, dateEnd });
   const contactIds = new Set(contacts.map((contact) => contactId(contact)));
-  const contactsWithInboundReplies = contacts
-    .map((contact) => {
+  const contactContexts = contacts.map((contact) => {
       const contactIdValue = contactId(contact);
       const context = blastThreadForContact(messages, contactIdValue, messagePhrase);
       return {
         contact,
         contactId: contactIdValue,
         latest: context.latest,
+        latestCandidate: context.latestCandidate,
         thread: context.thread,
+        matchedBlast: context.matchedBlast,
         blastFound: context.blastFound
       };
-    })
-    .filter((item) => item.latest);
-  const total = Math.min(contactsWithInboundReplies.length, 50);
+    });
+  const contactsWithMatchedBlast = contactContexts.filter((item) => item.blastFound);
+  const contactsWithInboundReplies = contactContexts.filter((item) => item.blastFound && item.latest);
+  const total = contactContexts.length;
   if (onProgress) await onProgress({ done: 0, total });
   let progressDone = 0;
-  const replies = await mapWithConcurrency(contactsWithInboundReplies.slice(0, 50), 5, async ({ contact, contactId, latest, thread, blastFound }) => {
-    const text = latest ? messageText(latest) : "";
-    const analysis = await classifyBlastReplyWithAi({ text, phrase: messagePhrase, thread, isCallReply: isCallMessage(latest) });
+  const replies = await mapWithConcurrency(contactContexts, 5, async ({
+    contact,
+    contactId,
+    latest,
+    latestCandidate,
+    thread,
+    matchedBlast,
+    blastFound
+  }) => {
+    const dndStatus = contactDndStatus(contact, matchedBlast?.channel || "SMS");
+    const analysisState = blastContactAnalysisState({ blastFound, latest });
+    const lastReplyDate = messageTimestamp(latest || latestCandidate) || "";
+    if (!analysisState.eligible) {
+      progressDone++;
+      if (onProgress) await onProgress({ done: progressDone, total });
+      return {
+        id: crypto.randomUUID(),
+        contactId,
+        contactName: contactName(contact),
+        lastReplyDate,
+        classification: "Not analyzed",
+        summary: analysisState.reason,
+        evidence: analysisState.status,
+        threadMessageCount: thread.length,
+        blastContextMatched: blastFound,
+        confidence: null,
+        analysisMethod: "Not analyzed",
+        analysisNote: "",
+        reviewStatus: analysisState.status,
+        analysisStatus: analysisState.status,
+        analyzed: false,
+        serviceRelevance: "Unclear",
+        relevanceReason: analysisState.reason,
+        doNotDisturb: dndStatus.isDnd,
+        dndChannel: dndStatus.isDnd ? dndStatus.channel : ""
+      };
+    }
+
+    const analysis = await classifyBlastReplyWithAi({
+      phrase: messagePhrase,
+      promotedOffer: matchedBlast?.text || "",
+      thread,
+      dndStatus
+    });
     progressDone++;
     if (onProgress) await onProgress({ done: progressDone, total });
     return {
       id: crypto.randomUUID(),
       contactId,
       contactName: contactName(contact),
-      lastReplyDate: latest?.dateAdded || latest?.createdAt || dateEnd,
+      lastReplyDate,
       classification: analysis.classification,
       summary: analysis.summary,
       evidence: analysis.evidence || `Matched HighLevel contact tag "${replyTag}" within the selected date range.`,
@@ -1764,35 +2131,53 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
       confidence: analysis.confidence,
       analysisMethod: analysis.analysisMethod,
       analysisNote: analysis.analysisNote,
-      reviewStatus: analysis.reviewStatus
+      reviewStatus: analysis.reviewStatus,
+      analysisStatus: "Analyzed",
+      analyzed: true,
+      serviceRelevance: analysis.serviceRelevance,
+      relevanceReason: analysis.relevanceReason,
+      doNotDisturb: dndStatus.isDnd,
+      dndChannel: dndStatus.isDnd ? dndStatus.channel : ""
     };
   });
-  const taggedWithoutMessageCount = Math.max(0, contacts.length - contactsWithInboundReplies.length);
+  const noBlastMatchCount = Math.max(0, contacts.length - contactsWithMatchedBlast.length);
+  const matchedBlastWithoutReplyCount = Math.max(0, contactsWithMatchedBlast.length - contactsWithInboundReplies.length);
 
   const phraseMatches = messages.filter((message) => {
     if (!messagePhrase) return false;
     const contactId = messageContactId(message);
-    return !contactIds.has(contactId) && messageText(message).toLowerCase().includes(messagePhrase.toLowerCase());
+    return isOutboundMessage(message)
+      && !contactIds.has(contactId)
+      && messageText(message).toLowerCase().includes(messagePhrase.toLowerCase());
   });
-  const counts = replies.reduce((acc, reply) => {
+  const analyzedReplies = replies.filter((reply) => reply.analyzed);
+  const counts = analyzedReplies.reduce((acc, reply) => {
     acc[reply.classification] = (acc[reply.classification] || 0) + 1;
     return acc;
   }, {});
-  const aiClassifiedCount = replies.filter((reply) => String(reply.analysisMethod || "").startsWith("AI")).length;
-  const fallbackClassifiedCount = replies.filter((reply) => String(reply.analysisMethod || "").includes("Rules")).length;
-  const analysisMethod = aiClassifiedCount && fallbackClassifiedCount
-    ? "AI + rules fallback"
-    : aiClassifiedCount ? "AI" : openAiApiKey ? "Rules fallback" : "Rules";
-  const methodSummary = aiClassifiedCount
-    ? `${aiClassifiedCount} reply/replies were classified by AI${fallbackClassifiedCount ? ` and ${fallbackClassifiedCount} used rules fallback` : ""}.`
-    : `${fallbackClassifiedCount} reply/replies used rules fallback${openAiApiKey ? " because AI classification did not complete" : " because OpenAI is not configured"}.`;
-  const fallbackReasons = [...new Set(replies.map((reply) => reply.analysisNote).filter(Boolean))];
+  const aiClassifiedCount = analyzedReplies.filter((reply) => String(reply.analysisMethod || "").startsWith("AI")).length;
+  const fallbackClassifiedCount = analyzedReplies.filter((reply) => String(reply.analysisMethod || "").includes("Rules")).length;
+  const dndClassifiedCount = analyzedReplies.filter((reply) => reply.analysisMethod === "HighLevel DND").length;
+  const analysisMethods = [
+    aiClassifiedCount ? "AI" : "",
+    dndClassifiedCount ? "HighLevel DND" : "",
+    fallbackClassifiedCount ? (openAiApiKey ? "rules fallback" : "rules") : ""
+  ].filter(Boolean);
+  const analysisMethod = analysisMethods.length ? analysisMethods.join(" + ") : "No classifications";
+  const methodParts = [
+    aiClassifiedCount ? `${aiClassifiedCount} reply/replies were classified by AI` : "",
+    dndClassifiedCount ? `${dndClassifiedCount} were classified from read-only HighLevel DND status` : "",
+    fallbackClassifiedCount
+      ? `${fallbackClassifiedCount} used ${openAiApiKey ? "rules fallback" : "rules because AI is not configured"}`
+      : ""
+  ].filter(Boolean);
+  const methodSummary = methodParts.length
+    ? `${methodParts.join(", ")}.`
+    : "No reply conversations were classified.";
+  const fallbackReasons = [...new Set(analyzedReplies.map((reply) => reply.analysisNote).filter(Boolean))];
   const fallbackReasonSummary = fallbackReasons.length ? ` Reason: ${fallbackReasons.slice(0, 2).join(" ")}` : "";
-  const blastContextMatches = replies.filter((reply) => reply.blastContextMatched).length;
-  const selectedWindowFallbacks = replies.length - blastContextMatches;
-  const threadSummary = messagePhrase
-    ? `${blastContextMatches} reply thread(s) were anchored to the matching blast phrase and ${selectedWindowFallbacks} used the selected-window conversation fallback.`
-    : "AI used bounded conversation messages in the selected date window because no blast phrase was provided.";
+  const blastContextMatches = analyzedReplies.filter((reply) => reply.blastContextMatched).length;
+  const threadSummary = `${blastContextMatches} classified reply thread(s) were anchored to the matching outbound blast and included every exported message from that blast onward inside the selected date range.`;
 
   return {
     id: crypto.randomUUID(),
@@ -1806,13 +2191,18 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     messageType: "SMS",
     estimatedSends: "Not available",
     deliveryRate: "Not available",
-    totalRepliedContacts: contactsWithInboundReplies.length,
+    taggedContactCount: contacts.length,
+    totalRepliedContacts: analyzedReplies.length,
+    analyzedContactCount: analyzedReplies.length,
+    matchedBlastCount: contactsWithMatchedBlast.length,
+    noBlastMatchCount,
+    matchedBlastWithoutReplyCount,
     positiveCount: counts.Positive || 0,
     neutralCount: counts.Neutral || 0,
     negativeCount: counts.Negative || 0,
     optOutCount: counts["Opt-out"] || 0,
     needsReviewCount: counts["Needs review"] || 0,
-    summary: `${contactsWithInboundReplies.length} tagged contact(s) had inbound replies in the selected message window. ${taggedWithoutMessageCount} tagged contact(s) had no exported inbound reply in that window. ${phraseMatches.length} extra message(s) matched the optional phrase without the reply tag. ${threadSummary} ${methodSummary}${fallbackReasonSummary}`,
+    summary: `${contacts.length} tagged contact(s) were found and all ${contacts.length} are listed below. ${contactsWithMatchedBlast.length} had a matching outbound blast. ${contactsWithInboundReplies.length} had an inbound reply after that blast and were classified. ${matchedBlastWithoutReplyCount} matched the blast but had no later inbound reply. ${noBlastMatchCount} had no matching outbound blast and were not force-classified. ${phraseMatches.length} extra message(s) matched the required phrase without the reply tag. ${threadSummary} ${methodSummary}${fallbackReasonSummary}`,
     source: "live",
     analysisMethod,
     replies,
@@ -1821,18 +2211,49 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
 }
 
 async function runBlastJob(jobId, params) {
+  const { user, client, ...analysisParams } = params;
+  const metadata = { clientId: client.id, authUserId: user.id };
   try {
-    await writeJob(jobId, { status: "running", progress: { done: 0, total: 0 } });
+    await writeJob(jobId, { ...metadata, status: "running", progress: { done: 0, total: 0 } });
     const analysis = await generateLiveBlastAnalysis({
-      ...params,
-      onProgress: (progress) => writeJob(jobId, { status: "running", progress })
+      ...analysisParams,
+      client,
+      onProgress: (progress) => writeJob(jobId, { ...metadata, status: "running", progress })
     });
-    const freshStore = await readStore();
+    const freshStore = await readStore(user);
     freshStore.blastAnalyses.unshift(analysis);
-    await writeStore(freshStore);
-    await writeJob(jobId, { status: "done", progress: { done: analysis.replies.length, total: analysis.replies.length }, analysis });
+    await persistBlastAnalysis(freshStore, analysis);
+    await writeAuditLog({
+      authUserId: user.id,
+      clientId: client.id,
+      action: "blast.generate",
+      targetType: "blast_analysis",
+      targetId: analysis.id,
+      message: "Live blast analysis completed."
+    });
+    await writeJob(jobId, { ...metadata, status: "done", progress: { done: analysis.replies.length, total: analysis.replies.length }, analysis });
   } catch (error) {
-    await writeJob(jobId, { status: "error", error: error.detail || error.message || "Blast analysis failed.", progress: { done: 0, total: 0 } }).catch(() => {});
+    await Promise.all([
+      writeAuditLog({
+        authUserId: user.id,
+        clientId: client.id,
+        action: "blast.generate",
+        targetType: "background_job",
+        targetId: jobId,
+        status: "failure",
+        message: `Live blast analysis failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      }),
+      writeAuditLog({
+        authUserId: user.id,
+        clientId: client.id,
+        action: "highlevel.read",
+        targetType: "blast_analysis",
+        targetId: jobId,
+        status: "failure",
+        message: `HighLevel read failed during blast analysis${error.status ? ` with HTTP ${error.status}` : ""}.`
+      })
+    ]).catch(() => {});
+    await writeJob(jobId, { ...metadata, status: "error", error: error.detail || error.message || "Blast analysis failed.", progress: { done: 0, total: 0 } }).catch(() => {});
   }
 }
 
@@ -1848,26 +2269,13 @@ function summaryForClassification(classification, phrase) {
   return map[classification];
 }
 
-function summaryForLatestReply(classification, text) {
-  const excerpt = sanitizeApiDetail(text);
-  const suffix = excerpt ? `: "${excerpt}"` : ".";
-  const map = {
-    Positive: `Contact showed interest or asked a follow-up question${suffix}`,
-    Neutral: `Contact replied without clear buying intent${suffix}`,
-    Negative: `Contact declined or showed no interest${suffix}`,
-    "Opt-out": `Contact asked to stop receiving similar outreach${suffix}`,
-    "Needs review": `Reply should be reviewed manually before counting as positive or negative${suffix}`
-  };
-  return map[classification] || `Contact replied${suffix}`;
-}
-
 function evidenceForClassification(classification) {
   const map = {
-    Positive: "Inbound reply contains interest language, a request for details, or a pricing question.",
-    Neutral: "Inbound reply is short or unclear.",
-    Negative: "Inbound reply contains no thanks, not interested, or similar decline language.",
-    "Opt-out": "Inbound reply asks to stop or remove.",
-    "Needs review": "Conversation context is not clear enough for automatic classification."
+    Positive: "Post-blast customer messages show interest, request details, or ask a buying or service question.",
+    Neutral: "Post-blast customer messages show neither clear interest nor clear rejection.",
+    Negative: "Post-blast customer messages clearly decline or show no interest.",
+    "Opt-out": "A post-blast customer message asks to stop or be removed.",
+    "Needs review": "The post-blast conversation does not contain enough usable customer text for automatic classification."
   };
   return map[classification];
 }
@@ -2122,10 +2530,33 @@ async function handleApi(req, res, pathname) {
         body: { email: body.email, password: body.password }
       });
       const user = await loadAppUser(payload.user);
-      if (!user) return forbidden(res, "This user is not approved for the Lead Hero Health Check Tool.");
+      if (!user) {
+        await recordAudit({
+          authUserId: payload.user?.id || null,
+          action: "auth.login",
+          targetType: "app_user",
+          targetId: payload.user?.id || "",
+          status: "failure",
+          message: "Authenticated identity is not provisioned or active."
+        });
+        return forbidden(res, "This user is not approved for the Lead Hero Health Check Tool.");
+      }
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.login",
+        targetType: "app_user",
+        targetId: user.id,
+        message: "Application login succeeded."
+      });
       setCookie(res, "lh_session", payload.access_token, { maxAge: payload.expires_in || 3600 });
       return json(res, 200, { user });
     } catch (error) {
+      await recordAudit({
+        action: "auth.login",
+        targetType: "app_user",
+        status: "failure",
+        message: `Application login failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      });
       return json(res, error.status || 401, {
         error: "Login failed. Please check your account access.",
         detail: error.detail || ""
@@ -2149,6 +2580,57 @@ async function handleApi(req, res, pathname) {
     return unauthorized(res);
   }
 
+  if (req.method === "POST" && pathname === "/api/auth/password-change") {
+    if (!supabaseConfigured) return json(res, 503, { error: "Supabase Auth administration is not configured." });
+    const body = await parseBody(req);
+    const validationError = selfPasswordChangeValidationError({
+      currentPassword: body.currentPassword,
+      password: body.password,
+      confirmation: body.passwordConfirmation
+    });
+    if (validationError) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.password_change",
+        targetType: "app_user",
+        targetId: user.id,
+        status: "failure",
+        message: "Self-service password change failed input validation."
+      });
+      return json(res, 400, { error: validationError });
+    }
+
+    try {
+      await verifyCurrentPassword(user, body.currentPassword);
+      await supabaseAdminAuth(`admin/users/${encodeURIComponent(user.id)}`, {
+        method: "PUT",
+        body: { password: body.password }
+      });
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.password_change",
+        targetType: "app_user",
+        targetId: user.id,
+        message: "Self-service password change completed."
+      });
+      await signOutAuthToken(parseCookies(req).lh_session);
+      clearCookie(res, "lh_session");
+      return json(res, 200, { message: "Password updated. Sign in again." });
+    } catch (error) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.password_change",
+        targetType: "app_user",
+        targetId: user.id,
+        status: "failure",
+        message: `Self-service password change failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      });
+      return json(res, error.status === 401 ? 401 : error.status === 422 ? 400 : 502, {
+        error: error.status === 401 ? "Current password is incorrect." : "The password could not be updated."
+      });
+    }
+  }
+
   if (req.method === "GET" && pathname === "/api/bootstrap") {
     if (authRequired && !user) {
       return json(res, 200, {
@@ -2170,7 +2652,7 @@ async function handleApi(req, res, pathname) {
         auth: { required: true, user: null }
       });
     }
-    const store = await readStore();
+    const store = await readStore(user);
     return json(res, 200, {
       ...store,
       clients: store.clients.map(publicClient),
@@ -2188,10 +2670,369 @@ async function handleApi(req, res, pathname) {
     });
   }
 
-  const store = await readStore();
+  if (req.method === "GET" && pathname === "/api/settings/users") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can view the user directory.");
+    if (!supabaseConfigured) {
+      return json(res, 200, {
+        users: [{
+          id: user.id,
+          email: user.email,
+          role: "admin",
+          active: true,
+          provisioned: true,
+          status: "Active",
+          protectedAdmin: true,
+          createdAt: "",
+          lastSignInAt: ""
+        }],
+        pagination: { page: 1, perPage: 25, hasPrevious: false, hasMore: false }
+      });
+    }
+    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    try {
+      const result = await listManagedUsers({
+        page: requestUrl.searchParams.get("page"),
+        perPage: requestUrl.searchParams.get("perPage")
+      });
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, error.status || 502, {
+        error: "User directory could not be loaded.",
+        detail: error.detail || ""
+      });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/settings/users/invite") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can create users.");
+    if (!supabaseConfigured) return json(res, 503, { error: "Supabase Auth administration is not configured." });
+    const body = await parseBody(req);
+    const email = validEmail(body.email);
+    const requestedRole = String(body.role || "user").toLowerCase();
+    const inputError = manualUserCreationValidationError({
+      email,
+      role: requestedRole,
+      password: body.password,
+      confirmation: body.passwordConfirmation,
+      adminPassword: body.adminPassword
+    });
+    if (inputError) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.create",
+        targetType: "app_user",
+        status: "failure",
+        message: "Application user creation failed input validation."
+      });
+      return json(res, 400, { error: inputError });
+    }
+
+    let createdAuthUserId = "";
+    try {
+      await verifyCurrentPassword(user, body.adminPassword);
+      const existing = await findAuthUserByEmail(email);
+      const duplicateError = manualUserCreationValidationError({
+        email,
+        role: requestedRole,
+        password: body.password,
+        confirmation: body.passwordConfirmation,
+        adminPassword: body.adminPassword,
+        existingUser: existing
+      });
+      if (duplicateError) {
+        await recordAudit({
+          authUserId: user.id,
+          action: "user.create",
+          targetType: "app_user",
+          targetId: existing.id,
+          status: "failure",
+          message: "Application user creation was rejected because the Auth account already exists."
+        });
+        return json(res, 409, { error: duplicateError });
+      }
+      const payload = await supabaseAdminAuth("admin/users", {
+        method: "POST",
+        body: {
+          email,
+          password: body.password,
+          email_confirm: true
+        }
+      });
+      const createdUser = payload?.user || payload;
+      if (!createdUser?.id) throw new Error("Supabase Auth did not return a created user.");
+      createdAuthUserId = createdUser.id;
+      const role = adminEmails.has(email) ? "admin" : requestedRole;
+      await supabaseRest("app_users", {
+        method: "POST",
+        query: { on_conflict: "auth_user_id" },
+        body: {
+          auth_user_id: createdUser.id,
+          email,
+          role,
+          active: true,
+          updated_at: new Date().toISOString()
+        },
+        prefer: "resolution=merge-duplicates"
+      });
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.create",
+        targetType: "app_user",
+        targetId: createdUser.id,
+        message: "Application user created."
+      });
+      return json(res, 201, {
+        user: safeManagedUser({
+          authUser: createdUser,
+          appUser: { auth_user_id: createdUser.id, email, role, active: true },
+          protectedAdmin: adminEmails.has(email)
+        })
+      });
+    } catch (error) {
+      if (createdAuthUserId) {
+        await supabaseAdminAuth(`admin/users/${encodeURIComponent(createdAuthUserId)}`, {
+          method: "DELETE"
+        }).catch(() => {});
+      }
+      const pendingRoleMigration = isPendingAdminUserRoleMigration(error);
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.create",
+        targetType: "app_user",
+        status: "failure",
+        message: pendingRoleMigration
+          ? "Application user creation failed because the Admin/User database migration is pending."
+          : `Application user creation failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      });
+      return json(res, pendingRoleMigration ? 503 : error.status === 401 ? 401 : error.status === 422 ? 400 : error.status || 502, {
+        error: pendingRoleMigration
+          ? "User creation is unavailable until the Admin/User database migration is applied."
+          : error.status === 401
+          ? "Current Admin password is incorrect."
+          : "The user could not be created."
+      });
+    }
+  }
+
+  const managedUserMatch = pathname.match(/^\/api\/settings\/users\/([0-9a-f-]+)$/i);
+  if (req.method === "PATCH" && managedUserMatch) {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can change users.");
+    if (!supabaseConfigured) return json(res, 503, { error: "Supabase Auth administration is not configured." });
+    const targetUserId = managedUserMatch[1];
+    const body = await parseBody(req);
+    const roleProvided = Object.prototype.hasOwnProperty.call(body, "role");
+    const activeProvided = Object.prototype.hasOwnProperty.call(body, "active");
+    if (!roleProvided && !activeProvided) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.update",
+        targetType: "app_user",
+        targetId: targetUserId,
+        status: "failure",
+        message: "Application user update failed because no supported change was provided."
+      });
+      return json(res, 400, { error: "Role or active status is required." });
+    }
+    if (roleProvided && !isSupportedAppRole(body.role)) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.update",
+        targetType: "app_user",
+        targetId: targetUserId,
+        status: "failure",
+        message: "Application user update failed role validation."
+      });
+      return json(res, 400, { error: "Role must be Admin or User." });
+    }
+
+    try {
+      const [authUser, appUser, activeAdminCount] = await Promise.all([
+        getAuthUserById(targetUserId),
+        getAppUserByAuthId(targetUserId),
+        countActiveAdmins()
+      ]);
+      if (!authUser?.id) {
+        await recordAudit({
+          authUserId: user.id,
+          action: "user.update",
+          targetType: "app_user",
+          targetId: targetUserId,
+          status: "failure",
+          message: "Application user update failed because the user was not found."
+        });
+        return json(res, 404, { error: "User not found." });
+      }
+      const email = String(authUser.email || appUser?.email || "").trim().toLowerCase();
+      const target = safeManagedUser({
+        authUser,
+        appUser,
+        protectedAdmin: adminEmails.has(email)
+      });
+      const nextRole = roleProvided ? String(body.role).toLowerCase() : target.role;
+      const nextActive = activeProvided ? body.active === true : target.active;
+      const mutationError = validateManagedUserMutation({
+        actor: user,
+        target,
+        nextRole,
+        nextActive,
+        activeAdminCount
+      });
+      if (mutationError) {
+        await recordAudit({
+          authUserId: user.id,
+          action: "user.update",
+          targetType: "app_user",
+          targetId: targetUserId,
+          status: "failure",
+          message: "Application user update was blocked by an authorization guard."
+        });
+        return json(res, 409, { error: mutationError });
+      }
+
+      await supabaseRest("app_users", {
+        method: "POST",
+        query: { on_conflict: "auth_user_id" },
+        body: {
+          auth_user_id: authUser.id,
+          email,
+          role: nextRole,
+          active: nextActive,
+          updated_at: new Date().toISOString()
+        },
+        prefer: "resolution=merge-duplicates"
+      });
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.update",
+        targetType: "app_user",
+        targetId: authUser.id,
+        message: "Application user role or active status updated."
+      });
+      return json(res, 200, { ok: true });
+    } catch (error) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "user.update",
+        targetType: "app_user",
+        targetId: targetUserId,
+        status: "failure",
+        message: `Application user update failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      });
+      return json(res, error.status || 502, {
+        error: "The user could not be updated.",
+        detail: error.detail || ""
+      });
+    }
+  }
+
+  const managedResetMatch = pathname.match(/^\/api\/settings\/users\/([0-9a-f-]+)\/password-reset$/i);
+  if (req.method === "POST" && managedResetMatch) {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can reset another user's password.");
+    if (!supabaseConfigured) return json(res, 503, { error: "Supabase Auth administration is not configured." });
+    const targetUserId = managedResetMatch[1];
+    if (targetUserId === user.id) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.password_reset",
+        targetType: "app_user",
+        targetId: targetUserId,
+        status: "failure",
+        message: "Admin-managed password reset was blocked for the signed-in account."
+      });
+      return json(res, 409, { error: "Use Change password to update your own account." });
+    }
+    const body = await parseBody(req);
+    try {
+      const appUser = await getAppUserByAuthId(targetUserId);
+      const accountError = managedPasswordResetValidationError({
+        appUser,
+        adminPassword: body.adminPassword,
+        password: body.password,
+        confirmation: body.passwordConfirmation
+      });
+      if (accountError) {
+        await recordAudit({
+          authUserId: user.id,
+          action: "auth.password_reset",
+          targetType: "app_user",
+          targetId: targetUserId,
+          status: "failure",
+          message: "Admin-managed password reset failed input or account validation."
+        });
+        return json(res, !appUser ? 404 : appUser.active === false ? 409 : 400, { error: accountError });
+      }
+      await verifyCurrentPassword(user, body.adminPassword);
+      await supabaseAdminAuth(`admin/users/${encodeURIComponent(targetUserId)}`, {
+        method: "PUT",
+        body: { password: body.password }
+      });
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.password_reset",
+        targetType: "app_user",
+        targetId: targetUserId,
+        message: "Admin-managed password reset completed."
+      });
+      return json(res, 200, { message: "Password updated." });
+    } catch (error) {
+      await recordAudit({
+        authUserId: user.id,
+        action: "auth.password_reset",
+        targetType: "app_user",
+        targetId: targetUserId,
+        status: "failure",
+        message: `Admin-managed password reset failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      });
+      return json(res, error.status === 401 ? 401 : error.status === 422 ? 400 : error.status || 502, {
+        error: error.status === 401
+          ? "Current Admin password is incorrect."
+          : "The password could not be updated."
+      });
+    }
+  }
+
+  if (req.method === "GET" && pathname === "/api/settings/audit-logs") {
+    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can view security audit events.");
+    if (!supabaseConfigured) {
+      return json(res, 200, {
+        events: [],
+        pagination: { page: 1, perPage: 25, hasPrevious: false, hasMore: false }
+      });
+    }
+    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    const page = Math.max(1, Number(requestUrl.searchParams.get("page")) || 1);
+    const perPage = Math.min(50, Math.max(1, Number(requestUrl.searchParams.get("perPage")) || 25));
+    try {
+      const rows = await supabaseRest("api_audit_logs", {
+        query: {
+          select: "id,auth_user_id,client_id,action,target_type,target_id,status,message,created_at",
+          action: `in.(${securityAuditActions.join(",")})`,
+          order: "created_at.desc",
+          limit: perPage + 1,
+          offset: (page - 1) * perPage
+        }
+      });
+      return json(res, 200, {
+        events: rows.slice(0, perPage).map(auditLogFromRow),
+        pagination: {
+          page,
+          perPage,
+          hasPrevious: page > 1,
+          hasMore: rows.length > perPage
+        }
+      });
+    } catch (error) {
+      return json(res, error.status || 502, {
+        error: "Security audit events could not be loaded.",
+        detail: error.detail || ""
+      });
+    }
+  }
+
+  const store = await readStore(user);
 
   if (req.method === "POST" && pathname === "/api/clients") {
-    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can add or update clients.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can add or update clients.");
     const body = await parseBody(req);
     const now = new Date().toISOString();
     const existing = body.id ? store.clients.find((item) => item.id === body.id) : null;
@@ -2221,12 +3062,30 @@ async function handleApi(req, res, pathname) {
     const index = store.clients.findIndex((item) => item.id === client.id);
     if (index >= 0) store.clients[index] = { ...store.clients[index], ...client };
     else store.clients.push(client);
-    await writeStore(store);
+    await persistClient(store, client);
+    await recordAudit({
+      authUserId: user.id,
+      clientId: client.id,
+      action: existing ? "client.update" : "client.create",
+      targetType: "client",
+      targetId: client.id,
+      message: existing ? "Client configuration updated." : "Client created."
+    });
+    if (body.pitToken) {
+      await recordAudit({
+        authUserId: user.id,
+        clientId: client.id,
+        action: existing?.tokenCiphertext ? "client.token_replace" : "client.token_add",
+        targetType: "client",
+        targetId: client.id,
+        message: existing?.tokenCiphertext ? "Encrypted HighLevel token replaced." : "Encrypted HighLevel token added."
+      });
+    }
     return json(res, 200, { client: publicClient(client), clients: store.clients.map(publicClient) });
   }
 
   if (req.method === "POST" && pathname === "/api/clients/disconnect") {
-    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can disconnect client HighLevel accounts.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can disconnect client HighLevel accounts.");
     const body = await parseBody(req);
     const client = store.clients.find((item) => item.id === body.clientId);
     if (!client) return json(res, 404, { error: "Client not found." });
@@ -2234,7 +3093,15 @@ async function handleApi(req, res, pathname) {
     client.tokenPreview = "";
     client.tokenCiphertext = "";
     client.updatedAt = new Date().toISOString();
-    await writeStore(store);
+    await persistClient(store, client);
+    await recordAudit({
+      authUserId: user.id,
+      clientId: client.id,
+      action: "client.token_remove",
+      targetType: "client",
+      targetId: client.id,
+      message: "Encrypted HighLevel token removed."
+    });
     return json(res, 200, {
       message: "Client HighLevel connection disconnected from this tool.",
       client: publicClient(client),
@@ -2243,7 +3110,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "POST" && pathname === "/api/highlevel/test") {
-    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can test client HighLevel connections.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can test client HighLevel connections.");
     const body = await parseBody(req);
     const client = store.clients.find((item) => item.id === body.clientId);
     if (!client) return json(res, 404, { error: "Client not found." });
@@ -2251,6 +3118,15 @@ async function handleApi(req, res, pathname) {
       const result = await testHighLevelConnection(client);
       return json(res, 200, result);
     } catch (error) {
+      await recordAudit({
+        authUserId: user.id,
+        clientId: client.id,
+        action: "highlevel.read",
+        targetType: "connection_test",
+        targetId: client.id,
+        status: "failure",
+        message: `HighLevel read-only connection test failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+      });
       return json(res, error.status || 502, {
         ok: false,
         error: "HighLevel connection failed. Please check the Private Integration Token and location ID.",
@@ -2260,7 +3136,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "POST" && pathname === "/api/routing") {
-    if (!canAccess(user, "admin")) return forbidden(res, "Only Admin users can update routing setup.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can update routing setup.");
     const body = await parseBody(req);
     if (!body.clientId || !body.staffPhone) {
       return json(res, 400, { error: "Client and staff phone are required." });
@@ -2280,27 +3156,38 @@ async function handleApi(req, res, pathname) {
     const index = store.routingSetups.findIndex((item) => item.id === setup.id);
     if (index >= 0) store.routingSetups[index] = setup;
     else store.routingSetups.push(setup);
-    await writeStore(store);
+    await persistRoutingSetup(store, setup);
+    await recordAudit({
+      authUserId: user.id,
+      clientId: setup.clientId,
+      action: "routing.update",
+      targetType: "routing_setup",
+      targetId: setup.id,
+      message: "Routing setup updated."
+    });
     return json(res, 200, { routingSetups: store.routingSetups });
   }
 
   if (req.method === "POST" && pathname === "/api/blasts/run") {
-    if (!canAccess(user, "operator")) return forbidden(res, "Only Admin and Operator users can run Blast Analyzer.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can run Blast Analyzer.");
     const body = await parseBody(req);
+    if (!canAccessClient(user, body.clientId)) return forbidden(res, "You do not have access to this client.");
     const client = store.clients.find((item) => item.id === body.clientId);
     if (!client) return json(res, 404, { error: "Client not found." });
-    if (!body.dateStart || !body.dateEnd || !body.replyTag) {
-      return json(res, 400, { error: "Client, date range, and reply tag are required." });
+    const messagePhrase = String(body.messagePhrase || "").trim();
+    if (!body.dateStart || !body.dateEnd || !body.replyTag || !messagePhrase) {
+      return json(res, 400, { error: "Client, date range, reply tag, and blast message phrase are required." });
     }
     if (client.tokenCiphertext) {
       const jobId = crypto.randomUUID();
       runBlastJob(jobId, {
+        user,
         client,
         dateStart: body.dateStart,
         dateEnd: body.dateEnd,
         replyTag: body.replyTag,
         workflowName: body.workflowName || "",
-        messagePhrase: body.messagePhrase || ""
+        messagePhrase
       });
       return json(res, 202, { jobId });
     }
@@ -2310,28 +3197,46 @@ async function handleApi(req, res, pathname) {
       dateEnd: body.dateEnd,
       replyTag: body.replyTag,
       workflowName: body.workflowName || "",
-      messagePhrase: body.messagePhrase || ""
+      messagePhrase
     });
     store.blastAnalyses.unshift(analysis);
-    await writeStore(store);
+    await persistBlastAnalysis(store, analysis);
+    await recordAudit({
+      authUserId: user.id,
+      clientId: client.id,
+      action: "blast.generate",
+      targetType: "blast_analysis",
+      targetId: analysis.id,
+      message: "Sample blast analysis completed."
+    });
     return json(res, 200, { analysis, blastAnalyses: store.blastAnalyses });
   }
 
   if (req.method === "GET" && pathname.startsWith("/api/blasts/job/")) {
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can view Blast Analyzer jobs.");
     const jobId = pathname.slice("/api/blasts/job/".length);
     if (!jobId) return json(res, 400, { error: "Job ID is required." });
     const job = await readJob(jobId);
     if (!job) return json(res, 404, { error: "Job not found." });
-    return json(res, 200, job);
+    if (!canAccessJob(user, job, { authRequired })) return forbidden(res, "You do not have access to this job.");
+    const { authUserId, ...publicJob } = job;
+    return json(res, 200, publicJob);
   }
 
   if (req.method === "POST" && pathname === "/api/monthly/run") {
-    if (!canAccess(user, "operator")) return forbidden(res, "Only Admin and Operator users can run monthly checks.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can run monthly checks.");
     const body = await parseBody(req);
+    if (!canAccessClient(user, body.clientId)) return forbidden(res, "You do not have access to this client.");
     const client = store.clients.find((item) => item.id === body.clientId);
     if (!client) return json(res, 404, { error: "Client not found." });
     if (!body.dateStart || !body.dateEnd) {
       return json(res, 400, { error: "Client and date range are required." });
+    }
+    if (body.blastAnalysisId) {
+      const blast = store.blastAnalyses.find((item) => item.id === body.blastAnalysisId);
+      if (!blast || blast.clientId !== client.id) {
+        return forbidden(res, "The selected blast analysis does not belong to this client.");
+      }
     }
     let report;
     try {
@@ -2351,48 +3256,113 @@ async function handleApi(req, res, pathname) {
           blastAnalysisId: body.blastAnalysisId || ""
         });
     } catch (error) {
+      await Promise.all([
+        recordAudit({
+          authUserId: user.id,
+          clientId: client.id,
+          action: "monthly.generate",
+          targetType: "monthly_report",
+          status: "failure",
+          message: `Monthly report generation failed${error.status ? ` with HTTP ${error.status}` : ""}.`
+        }),
+        recordAudit({
+          authUserId: user.id,
+          clientId: client.id,
+          action: "highlevel.read",
+          targetType: "monthly_report",
+          status: "failure",
+          message: `HighLevel read failed during monthly report generation${error.status ? ` with HTTP ${error.status}` : ""}.`
+        })
+      ]);
       return json(res, error.status || 502, {
         error: "HighLevel monthly check failed.",
         detail: error.detail || "The read-only HighLevel data pull could not complete."
       });
     }
     store.reports.unshift(report);
-    await writeStore(store);
+    await persistReport(store, report);
+    await recordAudit({
+      authUserId: user.id,
+      clientId: client.id,
+      action: "monthly.generate",
+      targetType: "monthly_report",
+      targetId: report.id,
+      message: `${report.source === "live" ? "Live" : "Sample"} monthly report completed.`
+    });
     return json(res, 200, { report, reports: store.reports });
   }
 
   if (req.method === "POST" && pathname === "/api/clickup/post") {
-    if (!canAccess(user, "operator")) return forbidden(res, "Only Admin and Operator users can post reviewed ClickUp comments.");
+    if (!canAccess(user, "user")) return forbidden(res, "Only active Admin and User accounts can post reviewed ClickUp comments.");
     const body = await parseBody(req);
     const report = store.reports.find((item) => item.id === body.reportId);
+    if (!report && supabaseConfigured && body.reportId) {
+      const rows = await supabaseRest("monthly_reports", {
+        query: { select: "id,client_id", id: `eq.${body.reportId}`, limit: "1" }
+      });
+      if (rows[0] && !canAccessClient(user, rows[0].client_id)) {
+        return forbidden(res, "You do not have access to the client for this report.");
+      }
+    }
     if (!report) return json(res, 404, { error: "Report not found." });
+    if (!canAccessClient(user, report.clientId)) return forbidden(res, "You do not have access to the client for this report.");
     const client = store.clients.find((item) => item.id === report.clientId);
     if (!client?.clickupTaskId) {
       return json(res, 400, { error: "ClickUp task ID is missing for this client." });
     }
 
     if (process.env.CLICKUP_API_TOKEN) {
-      const response = await fetch(`https://api.clickup.com/api/v2/task/${client.clickupTaskId}/comment`, {
-        method: "POST",
-        headers: {
-          "authorization": process.env.CLICKUP_API_TOKEN,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ comment_text: report.generatedComment, notify_all: false })
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        return json(res, response.status, { error: "ClickUp posting failed.", detail: errorText });
+      try {
+        const response = await fetch(`https://api.clickup.com/api/v2/task/${client.clickupTaskId}/comment`, {
+          method: "POST",
+          headers: {
+            "authorization": process.env.CLICKUP_API_TOKEN,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ comment_text: report.generatedComment, notify_all: false })
+        });
+        if (!response.ok) {
+          await response.text();
+          await recordAudit({
+            authUserId: user.id,
+            clientId: client.id,
+            action: "clickup.post",
+            targetType: "monthly_report",
+            targetId: report.id,
+            status: "failure",
+            message: `ClickUp posting failed with HTTP ${response.status}.`
+          });
+          return json(res, response.status, { error: "ClickUp posting failed.", detail: `ClickUp returned HTTP ${response.status}.` });
+        }
+        const payload = await response.json();
+        report.postedToClickUp = true;
+        report.clickupCommentId = payload.id || payload.comment?.id || "posted";
+      } catch (error) {
+        await recordAudit({
+          authUserId: user.id,
+          clientId: client.id,
+          action: "clickup.post",
+          targetType: "monthly_report",
+          targetId: report.id,
+          status: "failure",
+          message: "ClickUp posting failed before a response was received."
+        });
+        return json(res, 502, { error: "ClickUp posting failed.", detail: "ClickUp did not return a usable response." });
       }
-      const payload = await response.json();
-      report.postedToClickUp = true;
-      report.clickupCommentId = payload.id || payload.comment?.id || "posted";
     } else {
       report.postedToClickUp = true;
       report.clickupCommentId = "local-preview";
     }
 
-    await writeStore(store);
+    await persistReport(store, report);
+    await recordAudit({
+      authUserId: user.id,
+      clientId: client.id,
+      action: "clickup.post",
+      targetType: "monthly_report",
+      targetId: report.id,
+      message: "Reviewed monthly report posted to ClickUp."
+    });
     return json(res, 200, { report, reports: store.reports });
   }
 

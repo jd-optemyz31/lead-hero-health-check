@@ -40,6 +40,8 @@ The long-term version becomes a central health dashboard for all Lead Hero clien
 - Blast Analyzer must be runnable anytime, independent of monthly reporting.
 - Monthly reports must be reviewable before posting to ClickUp.
 - The tool should use evidence from HighLevel instead of relying on manual judgment.
+- Public signup is disabled. Admin-created accounts through the in-tool Invite user form are the only new-account path.
+- Authorization uses two application roles, Admin and User, and every protected API enforces its role independently of frontend visibility.
 
 ## Core Features
 
@@ -59,9 +61,33 @@ Store each client setup:
 - Active pipeline name or ID
 - Expected first-reply stage name or ID
 
-Admins can disconnect a client's HighLevel account from the tool. Disconnecting removes the saved HighLevel Private Integration Token from the Health Check Tool only. It does not change, revoke, or delete anything inside HighLevel.
+Admins and Users can disconnect a client's HighLevel account from the tool. Disconnecting removes the saved HighLevel Private Integration Token from the Health Check Tool only. It does not change, revoke, or delete anything inside HighLevel.
 
-Admins can edit all client connection details after setup, including timezone, location ID, ClickUp task ID, form lead tag, active pipeline, and first-reply stage. When editing an existing client, the Private Integration Token field is optional; leaving it blank keeps the saved encrypted token, and entering a new token replaces it.
+Admins and Users can edit all client connection details after setup, including timezone, location ID, ClickUp task ID, form lead tag, active pipeline, and first-reply stage. When editing an existing client, the Private Integration Token field is optional; leaving it blank keeps the saved encrypted token, and entering a new token replaces it.
+
+### Authentication And Settings
+
+**Priority:** Must-have
+
+The app uses Admin-provisioned Supabase Auth email/password login. Supported application roles:
+
+| Capability | Admin | User |
+|---|---:|---:|
+| View and manage all clients | Yes | Yes |
+| Run checks and Blast Analyzer | Yes | Yes |
+| Post reviewed ClickUp comments | Yes | Yes |
+| View user directory | Yes | No |
+| Invite/create, deactivate, reactivate, or change users | Yes | No |
+| Change or reset passwords | Any active account | Own account |
+| View security audit events | Yes | No |
+
+Both roles have global client access. Existing client-assignment records remain preserved but do not authorize access.
+
+Admin Settings includes a searchable user directory, role/status actions, manual account creation, password-reset actions, and paginated sanitized security events. User Settings includes current email/role, a self-service password-change form, and safe integration status. No settings response may expose secrets, sessions, IP addresses, password data, Auth metadata, tokens, or raw conversations.
+
+`ADMIN_EMAILS` identifies protected bootstrap Admins. Those accounts cannot be deactivated or changed to User in the app. An Admin cannot change their own role or active status, and at least one active Admin must always remain. Permanent deletion is not included.
+
+The Invite user form requires email, role, an Admin-set initial password with confirmation, and the signed-in Admin's current password. The account is created as confirmed and no email is sent. Self-service changes require the current password; Admin-managed resets require the acting Admin's current password. New passwords require 12 to 128 characters and confirmation. Password values are accepted only for these operations, sent directly to Supabase Auth, and never stored in application tables, returned by an API, displayed after submission, or written to audit events.
 
 ### Routing Setup
 
@@ -105,11 +131,12 @@ Inputs:
 - Date range
 - Reply tag, such as `Replied to Blast`
 - Optional blast workflow name or ID
-- Optional message phrase
+- Blast message phrase, required to anchor the conversation to the outbound blast
 
 Outputs:
 
-- Replied contacts
+- All reply-tagged candidate contacts
+- Analyzed replies with both a matching outbound blast and later inbound message
 - Positive replies
 - Negative replies
 - Neutral replies
@@ -117,15 +144,21 @@ Outputs:
 - Needs review
 - Conversation summaries
 - Confidence score
-- Analysis method: AI, rules fallback, or sample
+- Offer relevance: Promoted service, Different service, or Unclear
+- Read-only HighLevel DND indicator when applicable
+- Analysis method: AI, HighLevel DND, rules fallback, or sample
 - Review status
 - Saved timestamp
 
 AI classification is used only to summarize and categorize reply intent. It must not send messages, update HighLevel records, add tags, move opportunities, or trigger workflows.
 
-AI should classify intent semantically, not by a fixed phrase list. `Positive` means the contact shows interest, asks a buying or service question, wants details, or indicates willingness to continue. `Negative` means the contact clearly declines or shows no interest. `Opt-out` means the contact asks not to be contacted or to unsubscribe. `Neutral` means understandable but no clear interest or rejection. `Needs review` should only be used when AI cannot explicitly tell the intent, the reply text is missing or contradictory, or the contact responded through a call record instead of a text reply.
+AI should classify the customer's overall intent toward the specific service promoted in the matched outbound blast across the complete post-blast conversation, not only the latest inbound reply and not by a fixed phrase list. `Positive` means the contact shows genuine interest in the promoted service, asks a relevant buying or service question, requests pricing, details, or next steps, or indicates willingness to visit, book, or continue for that service. `Negative` means the overall customer conversation clearly declines or rejects the promoted offer or explicitly shows no interest in it. A different-service-only inquiry is `Neutral` for the blast because it neither accepts nor rejects the promoted offer. `Opt-out` takes precedence only when HighLevel reports the contact as DND for the blast channel or an inbound customer message contains a standalone `STOP` instruction or another unambiguous request not to be contacted. Normal language such as `Sounds good. I'll stop by tomorrow` is Positive rather than Opt-out. `Neutral` also includes temporary deferrals such as `not ready right now`, acknowledgements such as `okay, thanks`, and identity questions such as `who is this`. `Needs review` is exceptional and should only be used when there is no usable inbound customer text, the only evidence is a call record without text intent, or the complete conversation is genuinely irreconcilable. Short, cautious, or informal replies should not be marked `Needs review` by default.
 
-When AI is used, the tool should send a bounded post-blast conversation thread, not the full contact history. If the optional blast message phrase is provided and found, AI receives only the matched blast context and messages after that blast within the selected date range. If no phrase is provided or no match is found, AI receives only a small capped thread from the selected date range for that contact.
+When AI is used, the blast message phrase is required as a distinctive search anchor. The user does not need to paste the full blast into another field. The tool matches the anchor against an outbound message for each reply-tagged contact, automatically extracts the actual matched outbound blast as the promoted-offer context, and serializes every exported message from that blast onward within the selected date range as a structured in-memory JSON payload. The complete post-blast conversation is the primary classification evidence; outbound messages provide context while inbound customer messages provide intent. Before AI classification, the server reads the contact's overall and channel-specific HighLevel DND fields from the existing read-only contact result. The tool must not write a raw-conversation JSON file or persist the full thread, and it must not fall back to an unanchored selected-window conversation when the phrase is missing or no outbound match is found. Messages before the matched blast and conversation history outside the selected date range are not sent.
+
+The results table must account for every contact returned with the reply tag. A candidate with no matching outbound phrase is listed as `Not analyzed — No blast match`; a candidate with a matched blast but no later inbound message is listed as `Not analyzed — No post-blast reply`. These diagnostic rows are excluded from Positive, Neutral, Negative, Opt-out, and Needs review counts and are never force-classified from an unanchored conversation.
+
+When HighLevel's direct tag filter is unavailable or unreliable, the server may paginate the read-only contact search and apply the tag locally. The scan has a 50,000-contact safety ceiling and must fail the run if that ceiling is reached; it must never silently save a partial tagged-contact population as complete.
 
 Saved blast analyses should be shown newest first wherever they are selected for a monthly check. Users can clear the currently loaded Blast Analyzer result from the screen so a fresh run can be reviewed without confusion. Clearing the loaded result must not delete the saved analysis from production storage and must not change anything in HighLevel.
 
@@ -257,8 +290,8 @@ Next Month Focus:
 
 ### Disconnecting A Client
 
-1. Admin opens Clients.
-2. Admin chooses Disconnect for the client.
+1. Admin or User opens Clients.
+2. Admin or User chooses Disconnect for the client.
 3. Tool asks for confirmation.
 4. Tool removes the encrypted HighLevel token and token preview from its own storage.
 5. Client setup, routing setup, reports, and ClickUp task ID remain saved.
@@ -266,11 +299,11 @@ Next Month Focus:
 
 ### Editing Client Connection Details
 
-1. Admin opens Clients.
-2. Admin chooses Edit for the client.
+1. Admin or User opens Clients.
+2. Admin or User chooses Edit for the client.
 3. Tool pre-fills all editable setup fields.
-4. Admin updates timezone, location ID, ClickUp task ID, automation-flow fields, or other client metadata.
-5. Admin leaves the PIT field blank to keep the saved token, or enters a new read-only PIT to replace it.
+4. Admin or User updates timezone, location ID, ClickUp task ID, automation-flow fields, or other client metadata.
+5. Admin or User leaves the PIT field blank to keep the saved token, or enters a new read-only PIT to replace it.
 6. Tool saves the updated settings without calling or modifying HighLevel.
 
 ### Running A Monthly Check
@@ -290,12 +323,12 @@ Next Month Focus:
 2. User selects client.
 3. User selects date range.
 4. User enters reply tag, such as `Replied to Blast`.
-5. User optionally selects workflow name/ID or message phrase.
+5. User optionally selects a workflow name/ID and enters the required blast message phrase.
 6. User clicks Run Analysis. For live HighLevel clients, the server starts a background job and returns a job ID immediately. The button changes to "Running..." and the results area shows an in-progress panel.
 7. The frontend polls the job status every 3 seconds. The progress panel updates to show "Classifying contacts... X of Y" as each contact is classified.
-8. Tool finds matching contacts and conversations.
-9. Tool classifies replies with AI when `OPENROUTER_API_KEY` or `OPENAI_API_KEY` is configured, otherwise it uses the built-in rules fallback.
-10. When the job completes, results appear automatically and are saved. The Run Analysis button becomes active again.
+8. Tool finds matching contacts and conversations, automatically extracts each matched outbound blast as the promoted-offer context, and reads overall/channel-specific DND state from the HighLevel contact response.
+9. Active HighLevel DND or an explicit opt-out is classified as Opt-out. Remaining replies are classified against the promoted service with AI when `OPENROUTER_API_KEY` or `OPENAI_API_KEY` is configured, otherwise the built-in rules fallback is used.
+10. When the job completes, every reply-tagged candidate appears in the results. Safely anchored replies are classified; missing blast matches and missing post-blast replies remain visible as Not analyzed diagnostics.
 11. Saved blast analyses appear newest first with saved date and time.
 12. User can clear the currently displayed analysis from the Blast Analyzer screen without deleting it from storage.
 13. Saved blast analysis can later be attached to a monthly report.
@@ -315,6 +348,8 @@ Version one includes:
 - Reviewable report
 - ClickUp comment posting
 - Saved reports and blast analyses
+- Invite-only authentication with Admin and User roles
+- User Settings, Admin user management, in-tool password management, and sanitized audit history
 
 ## Not In Version One
 

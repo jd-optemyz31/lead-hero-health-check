@@ -14,7 +14,8 @@ const navItems = [
   { id: "clients", label: "Clients", icon: icons.clients },
   { id: "blast", label: "Blast Analyzer", icon: icons.blast },
   { id: "monthly", label: "Monthly Check", icon: icons.monthly },
-  { id: "reports", label: "Reports", icon: icons.reports }
+  { id: "reports", label: "Reports", icon: icons.reports },
+  { id: "settings", label: "Settings", icon: icons.settings }
 ];
 
 const state = {
@@ -32,6 +33,13 @@ const state = {
   activeBlastAnalysis: null,
   blastResultsCleared: false,
   blastJob: null,
+  passwordResetUserId: "",
+  settingsUsers: [],
+  settingsAuditEvents: [],
+  settingsUsersPagination: { page: 1, perPage: 25, hasPrevious: false, hasMore: false },
+  settingsAuditPagination: { page: 1, perPage: 25, hasPrevious: false, hasMore: false },
+  settingsDataLoaded: false,
+  settingsDataLoading: false,
   toast: ""
 };
 
@@ -141,7 +149,28 @@ function localApi(path, options = {}, originalError) {
   const now = new Date().toISOString();
 
   if (method === "GET" && path === "/api/bootstrap") return store;
-
+  if (method === "GET" && path.startsWith("/api/settings/users")) {
+    return {
+      users: [{
+        id: "local-dev",
+        email: "local-dev",
+        role: "admin",
+        active: true,
+        provisioned: true,
+        status: "Active",
+        protectedAdmin: true,
+        createdAt: "",
+        lastSignInAt: ""
+      }],
+      pagination: { page: 1, perPage: 25, hasPrevious: false, hasMore: false }
+    };
+  }
+  if (method === "GET" && path.startsWith("/api/settings/audit-logs")) {
+    return {
+      events: [],
+      pagination: { page: 1, perPage: 25, hasPrevious: false, hasMore: false }
+    };
+  }
   if (method === "POST" && path === "/api/clients") {
     const existing = body.id ? store.clients.find((item) => item.id === body.id) : null;
     if (!existing && !body.pitToken) throw new Error("A read-only HighLevel Private Integration Token is required when adding a client.");
@@ -257,7 +286,9 @@ function localBlastAnalysis(client, body) {
     messageType: "SMS",
     estimatedSends: "Not available",
     deliveryRate: "Not available",
+    taggedContactCount: total,
     totalRepliedContacts: total,
+    analyzedContactCount: total,
     positiveCount: 9,
     neutralCount: 4,
     negativeCount: 3,
@@ -421,6 +452,10 @@ function isAdminUser() {
   return state.auth?.user?.role === "admin";
 }
 
+function canManageClients() {
+  return ["admin", "user"].includes(state.auth?.user?.role) || !state.auth?.required;
+}
+
 function timeZones() {
   if (typeof Intl?.supportedValuesOf === "function") {
     return Intl.supportedValuesOf("timeZone");
@@ -463,6 +498,7 @@ function sourceBadge(source) {
 }
 
 function formatConfidence(value) {
+  if (value === null || value === undefined || value === "") return "Not scored";
   const number = Number(value);
   if (!Number.isFinite(number)) return "Not scored";
   return `${Math.round(number * 100)}%`;
@@ -474,7 +510,7 @@ function errorMessage(error) {
 
 function renderShell(content, title, subtitle, actions = "") {
   const authActions = state.auth?.user
-    ? `<span class="user-chip">${escapeHtml(state.auth.user.email || "User")} | ${escapeHtml(state.auth.user.role || "viewer")}</span><button class="btn secondary small" type="button" data-logout>Log out</button>`
+    ? `<span class="user-chip">${escapeHtml(state.auth.user.email || "User")} | ${escapeHtml(state.auth.user.role || "user")}</span><button class="btn secondary small" type="button" data-logout>Log out</button>`
     : "";
   app.innerHTML = `
     <div class="app-shell">
@@ -523,7 +559,8 @@ function render() {
     clients: renderClients,
     blast: renderBlast,
     monthly: renderMonthly,
-    reports: renderReports
+    reports: renderReports,
+    settings: renderSettings
   };
   if (!views[state.active]) state.active = "clients";
   views[state.active]();
@@ -541,6 +578,7 @@ function renderLogin() {
           <div class="field"><label>Password</label><input name="password" type="password" autocomplete="current-password" required></div>
           <button class="btn primary" type="submit">${icons.play} Sign in</button>
         </form>
+        <p class="security-note">If you cannot sign in, contact an Admin. Password recovery email is not used by this tool.</p>
       </section>
       <div class="toast ${state.toast ? "" : "hidden"}">${escapeHtml(state.toast)}</div>
     </main>
@@ -560,7 +598,7 @@ function renderLogin() {
 }
 
 function renderClients() {
-  const canManageConnections = isAdminUser();
+  const canManageConnections = canManageClients();
   const editingClient = state.clients.find((client) => client.id === state.editingClientId);
   const editingRouting = state.routingSetups.find((setup) => setup.id === state.editingRoutingId);
   const routingClientId = editingRouting?.clientId || editingClient?.id || currentClientId();
@@ -768,9 +806,12 @@ function renderClients() {
 }
 
 function pollBlastJob(jobId) {
+  let consecutiveFailures = 0;
+  const startedAt = Date.now();
   const interval = setInterval(async () => {
     try {
       const job = await api(`/api/blasts/job/${jobId}`);
+      consecutiveFailures = 0;
       const progressEl = document.querySelector("#blast-job-progress");
       if (progressEl && job.status === "running" && job.progress.total > 0) {
         progressEl.textContent = `Classifying contacts... ${job.progress.done} of ${job.progress.total}`;
@@ -785,7 +826,9 @@ function pollBlastJob(jobId) {
         ]);
         state.activeBlastAnalysisId = job.analysis.id;
         if (state.active === "blast") render();
-        showToast("Live HighLevel blast analysis saved.");
+        showToast(job.analysis.totalRepliedContacts
+          ? "Live HighLevel blast analysis saved."
+          : "Blast analysis completed with no matching post-blast replies. Review the result diagnostics.");
       } else if (job.status === "error") {
         clearInterval(interval);
         state.blastJob = null;
@@ -793,7 +836,13 @@ function pollBlastJob(jobId) {
         showToast(job.error || "Blast analysis failed.");
       }
     } catch {
-      // ignore transient poll errors
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 3 || Date.now() - startedAt > 15 * 60 * 1000) {
+        clearInterval(interval);
+        state.blastJob = null;
+        if (state.active === "blast") render();
+        showToast("Blast analysis status could not be read. Please run the analysis again.");
+      }
     }
   }, 3000);
 }
@@ -818,6 +867,10 @@ function renderBlast() {
       <td>${escapeHtml(formatConfidence(reply.confidence))}</td>
       <td>${escapeHtml(reply.summary)}</td>
       <td>${escapeHtml(reply.evidence)}</td>
+      <td>${reply.doNotDisturb
+        ? `${badge("HighLevel DND")}<br><span class="muted">${escapeHtml(reply.dndChannel || "Blast channel")}</span>`
+        : `${badge(reply.serviceRelevance || "Unclear")}${reply.relevanceReason ? `<br><span class="muted">${escapeHtml(reply.relevanceReason)}</span>` : ""}`
+      }</td>
       <td>${escapeHtml(reply.analysisMethod || "Rules")}</td>
       <td>${escapeHtml(reply.reviewStatus)}${reply.analysisNote ? `<br><span class="muted">${escapeHtml(reply.analysisNote)}</span>` : ""}${reply.threadMessageCount ? `<br><span class="muted">${escapeHtml(`${reply.threadMessageCount} post-blast message(s) reviewed${reply.blastContextMatched ? " after matched blast" : ""}.`)}</span>` : ""}</td>
     </tr>
@@ -827,7 +880,7 @@ function renderBlast() {
     <div class="grid">
       <section class="panel">
         <div class="panel-header">
-          <div><h2>Run blast analysis anytime</h2><p>Use reply tag + date range to classify responses. This does not launch blasts or message contacts.</p></div>
+          <div><h2>Run blast analysis anytime</h2><p>Use reply tag, date range, and the required blast phrase to account for every tagged contact and classify safely anchored post-blast conversations. This does not launch blasts or message contacts.</p></div>
         </div>
         <form id="blast-form" class="grid">
           <div class="form-grid three">
@@ -836,7 +889,7 @@ function renderBlast() {
             <div class="field"><label>End date</label><input type="date" name="dateEnd" required value="${todayIso()}"></div>
             <div class="field"><label>Reply tag</label><input name="replyTag" required value="Replied to Blast"></div>
             <div class="field"><label>Optional workflow name or ID</label><input name="workflowName" placeholder="BLAST - May Offer"></div>
-            <div class="field"><label>Optional blast message phrase</label><input name="messagePhrase" placeholder="Offer, event, or message phrase"></div>
+            <div class="field"><label>Blast message phrase</label><input name="messagePhrase" required placeholder="Distinctive wording from the outbound blast"></div>
           </div>
           <div class="actions"><button class="btn primary" type="submit" ${state.clients.length && !state.blastJob ? "" : "disabled"}>${icons.play} ${state.blastJob ? "Running..." : "Run analysis"}</button></div>
         </form>
@@ -884,9 +937,17 @@ function renderBlast() {
 }
 
 function renderBlastResult(analysis, rows, actions = "") {
+  const resultRows = rows || `
+    <tr>
+      <td colspan="9">
+        <div class="empty">No tagged contact had both the required outbound blast phrase and a later inbound reply in this date range. Review the diagnostic summary above, then confirm the reply tag, phrase, and dates.</div>
+      </td>
+    </tr>
+  `;
   return `
-    <section class="grid six">
-      ${metricCard("Replied contacts", analysis.totalRepliedContacts, analysis.replyTag)}
+    <section class="grid blast-metrics">
+      ${metricCard("Tagged contacts", analysis.taggedContactCount ?? analysis.totalRepliedContacts, analysis.replyTag)}
+      ${metricCard("Analyzed replies", analysis.analyzedContactCount ?? analysis.totalRepliedContacts, "Matched blast and later inbound reply")}
       ${metricCard("Positive", analysis.positiveCount, "Interested or likely follow-up")}
       ${metricCard("Neutral", analysis.neutralCount, "No clear intent")}
       ${metricCard("Negative", analysis.negativeCount, "Low interest")}
@@ -895,7 +956,7 @@ function renderBlastResult(analysis, rows, actions = "") {
     </section>
     <section class="panel">
       <div class="panel-header">
-          <div><h2>Conversation classifications</h2><p>${escapeHtml(analysis.summary)} Saved ${escapeHtml(formatSavedAt(analysis.createdAt))}.</p></div>
+          <div><h2>All tagged contacts</h2><p>${escapeHtml(analysis.summary)} Saved ${escapeHtml(formatSavedAt(analysis.createdAt))}.</p></div>
           <div class="panel-tools">
             <div class="badge-group">${sourceBadge(analysis.source)}${badge(analysis.analysisMethod || "Rules")}${badge(`${analysis.dateStart} to ${analysis.dateEnd}`)}</div>
             <div class="actions">${actions}</div>
@@ -903,8 +964,8 @@ function renderBlastResult(analysis, rows, actions = "") {
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Contact</th><th>Last reply</th><th>Classification</th><th>Confidence</th><th>Summary</th><th>Evidence</th><th>Method</th><th>Status</th></tr></thead>
-            <tbody>${rows}</tbody>
+            <thead><tr><th>Contact</th><th>Last reply</th><th>Classification</th><th>Confidence</th><th>Summary</th><th>Evidence</th><th>Offer relevance / DND</th><th>Method</th><th>Status</th></tr></thead>
+            <tbody>${resultRows}</tbody>
           </table>
         </div>
     </section>
@@ -1025,6 +1086,328 @@ async function postClickUp(reportId) {
   }
 }
 
+function formatOptionalDate(value, fallback = "Never") {
+  if (!value) return fallback;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : fallback;
+}
+
+async function loadSettingsData({
+  usersPage = state.settingsUsersPagination.page || 1,
+  auditPage = state.settingsAuditPagination.page || 1
+} = {}) {
+  if (!isAdminUser()) return;
+  state.settingsDataLoading = true;
+  if (state.active === "settings") render();
+  try {
+    const [userPayload, auditPayload] = await Promise.all([
+      api(`/api/settings/users?page=${usersPage}&perPage=25`),
+      api(`/api/settings/audit-logs?page=${auditPage}&perPage=25`)
+    ]);
+    state.settingsUsers = userPayload.users || [];
+    state.settingsUsersPagination = userPayload.pagination || state.settingsUsersPagination;
+    state.settingsAuditEvents = auditPayload.events || [];
+    state.settingsAuditPagination = auditPayload.pagination || state.settingsAuditPagination;
+    state.settingsDataLoaded = true;
+  } catch (error) {
+    showToast(errorMessage(error));
+  } finally {
+    state.settingsDataLoading = false;
+    if (state.active === "settings") render();
+  }
+}
+
+function settingsIntegrationCards() {
+  const items = [
+    ["HighLevel", `Read-only API ${state.settings.highLevelApiVersion || "2021-07-28"}`],
+    ["ClickUp", state.settings.clickupConnected ? "Connected for reviewed comments" : "Not connected"],
+    ["AI classification", state.settings.aiConnected ? `${state.settings.aiProvider === "openrouter" ? "OpenRouter" : "OpenAI"} connected` : "Rules fallback"],
+    ["Storage", state.settings.storage || "Local"],
+    ["Authentication", state.settings.authRequired ? "Required" : "Local development bypass"]
+  ];
+  return items.map(([label, detail]) => `
+    <div class="evidence-item">
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(detail)}</span>
+    </div>
+  `).join("");
+}
+
+function renderSettings() {
+  const isAdmin = isAdminUser();
+  const currentUser = state.auth?.user || {};
+  const currentUserId = currentUser.id || "";
+  const usersById = new Map(state.settingsUsers.map((item) => [item.id, item]));
+  const passwordResetUser = usersById.get(state.passwordResetUserId);
+  const userRows = state.settingsUsers.map((managedUser) => {
+    const protectedAccount = managedUser.protectedAdmin;
+    const self = managedUser.id === currentUserId;
+    const changeDisabled = protectedAccount || self;
+    return `
+      <tr data-user-row="${escapeHtml(managedUser.email.toLowerCase())}">
+        <td>
+          <strong>${escapeHtml(managedUser.email || "Email unavailable")}</strong>
+          ${protectedAccount ? `<br><span class="muted">Environment-managed Admin</span>` : ""}
+        </td>
+        <td>
+          <select class="compact-select" data-user-role="${escapeHtml(managedUser.id)}" ${changeDisabled ? "disabled" : ""}>
+            <option value="admin" ${managedUser.role === "admin" ? "selected" : ""}>Admin</option>
+            <option value="user" ${managedUser.role === "user" ? "selected" : ""}>User</option>
+          </select>
+        </td>
+        <td>${badge(managedUser.status)}</td>
+        <td>${escapeHtml(formatOptionalDate(managedUser.lastSignInAt))}</td>
+        <td>${escapeHtml(formatOptionalDate(managedUser.createdAt, "Unknown"))}</td>
+        <td>
+          <div class="table-actions">
+            <button class="btn secondary small" type="button" data-reset-user="${escapeHtml(managedUser.id)}" ${!managedUser.active || self ? "disabled" : ""}>Reset password</button>
+            <button class="btn ${managedUser.active ? "danger" : "secondary"} small" type="button" data-toggle-user="${escapeHtml(managedUser.id)}" data-next-active="${managedUser.active ? "false" : "true"}" ${changeDisabled ? "disabled" : ""}>${managedUser.active ? "Deactivate" : "Reactivate"}</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+  const auditRows = state.settingsAuditEvents.map((event) => {
+    const actor = usersById.get(event.actorUserId);
+    return `
+      <tr>
+        <td>${escapeHtml(formatOptionalDate(event.createdAt, "Unknown"))}</td>
+        <td><strong>${escapeHtml(event.action)}</strong><br><span class="muted">${escapeHtml(event.targetType || "application")}</span></td>
+        <td>${badge(event.status)}</td>
+        <td>${escapeHtml(actor?.email || event.actorUserId || "System")}</td>
+        <td>${escapeHtml(event.message || "")}</td>
+      </tr>
+    `;
+  }).join("");
+  const invitePanel = isAdmin
+    ? `
+      <section class="panel">
+        <div class="panel-header">
+          <div><h2>Invite user</h2><p>Create a confirmed member manually. No invitation email is sent.</p></div>
+          ${badge("Admin only")}
+        </div>
+        <form id="invite-user-form" class="form-grid">
+          <div class="field"><label>Email</label><input name="email" type="email" autocomplete="off" required></div>
+          <div class="field"><label>Role</label><select name="role"><option value="user" selected>User</option><option value="admin">Admin</option></select></div>
+          <div class="field"><label>Initial password</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
+          <div class="field"><label>Confirm initial password</label><input name="passwordConfirmation" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
+          <div class="field"><label>Your current Admin password</label><input name="adminPassword" type="password" autocomplete="current-password" required></div>
+          <div class="actions"><button class="btn primary" type="submit">Create member</button></div>
+        </form>
+        <p class="security-note">The initial password is sent only to Supabase Auth and is never saved in application tables, returned, displayed again, or written to audit events. Share it through an approved internal channel.</p>
+      </section>
+    `
+    : "";
+  const userDirectoryPanel = isAdmin
+    ? `
+      <section class="panel">
+        <div class="panel-header">
+          <div><h2>Users and roles</h2><p>Admins manage every user. User accounts retain full operational client access.</p></div>
+          <input id="settings-user-search" class="search-input" type="search" placeholder="Search users" aria-label="Search users">
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody>${state.settingsDataLoading && !state.settingsDataLoaded
+              ? `<tr><td colspan="6"><div class="empty">Loading users...</div></td></tr>`
+              : userRows || `<tr><td colspan="6"><div class="empty">No users found.</div></td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button class="btn secondary small" type="button" data-users-page="${state.settingsUsersPagination.page - 1}" ${state.settingsUsersPagination.hasPrevious && !state.settingsDataLoading ? "" : "disabled"}>Previous</button>
+          <span class="muted">Page ${state.settingsUsersPagination.page}</span>
+          <button class="btn secondary small" type="button" data-users-page="${state.settingsUsersPagination.page + 1}" ${state.settingsUsersPagination.hasMore && !state.settingsDataLoading ? "" : "disabled"}>Next</button>
+        </div>
+      </section>
+    `
+    : "";
+  const auditPanel = isAdmin
+    ? `
+      <section class="panel">
+        <div class="panel-header"><div><h2>Security audit events</h2><p>Sanitized authentication, user-management, and security events.</p></div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Time</th><th>Event</th><th>Status</th><th>Actor</th><th>Message</th></tr></thead>
+            <tbody>${state.settingsDataLoading && !state.settingsDataLoaded
+              ? `<tr><td colspan="5"><div class="empty">Loading audit events...</div></td></tr>`
+              : auditRows || `<tr><td colspan="5"><div class="empty">No audit events found.</div></td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button class="btn secondary small" type="button" data-audit-page="${state.settingsAuditPagination.page - 1}" ${state.settingsAuditPagination.hasPrevious && !state.settingsDataLoading ? "" : "disabled"}>Previous</button>
+          <span class="muted">Page ${state.settingsAuditPagination.page}</span>
+          <button class="btn secondary small" type="button" data-audit-page="${state.settingsAuditPagination.page + 1}" ${state.settingsAuditPagination.hasMore && !state.settingsDataLoading ? "" : "disabled"}>Next</button>
+        </div>
+      </section>
+    `
+    : "";
+
+  renderShell(`
+    <div class="grid">
+      <section class="grid two">
+        <div class="panel">
+          <div class="panel-header"><div><h2>Your account</h2><p>Account identity and password management.</p></div></div>
+          <div class="evidence-list">
+            <div class="evidence-item"><strong>${escapeHtml(currentUser.email || "Local development")}</strong><span>Role: ${escapeHtml(currentUser.role || "admin")}</span></div>
+          </div>
+          <form id="self-password-form" class="grid">
+            <div class="field"><label>Current password</label><input name="currentPassword" type="password" autocomplete="current-password" required></div>
+            <div class="field"><label>New password</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
+            <div class="field"><label>Confirm new password</label><input name="passwordConfirmation" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
+            <div class="actions"><button class="btn secondary" type="submit">Change password</button></div>
+          </form>
+          <p class="security-note">After changing your password, you must sign in again.</p>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><div><h2>System connections</h2><p>Status only. Secrets are never displayed.</p></div></div>
+          <div class="evidence-list">${settingsIntegrationCards()}</div>
+        </div>
+      </section>
+      ${invitePanel}
+      ${userDirectoryPanel}
+      ${auditPanel}
+    </div>
+    ${isAdmin && passwordResetUser ? `
+      <div class="modal-backdrop" data-password-modal>
+        <section class="password-modal" role="dialog" aria-modal="true" aria-labelledby="password-reset-title">
+          <div class="panel-header">
+            <div><h2 id="password-reset-title">Reset password</h2><p>Set a new password for ${escapeHtml(passwordResetUser.email)}.</p></div>
+            <button class="btn secondary small" type="button" data-cancel-password-reset>Cancel</button>
+          </div>
+          <form id="managed-password-form" class="grid">
+            <div class="field"><label>New password</label><input name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required autofocus></div>
+            <div class="field"><label>Confirm new password</label><input name="passwordConfirmation" type="password" minlength="12" maxlength="128" autocomplete="new-password" required></div>
+            <div class="field"><label>Your current Admin password</label><input name="adminPassword" type="password" autocomplete="current-password" required></div>
+            <div class="actions">
+              <button class="btn secondary" type="button" data-cancel-password-reset>Cancel</button>
+              <button class="btn primary" type="submit">Update password</button>
+            </div>
+          </form>
+          <p class="security-note">The new password is sent only to Supabase Auth and is never stored or displayed by this tool.</p>
+        </section>
+      </div>
+    ` : ""}
+  `, "Settings", isAdmin ? "Manage users, roles, security events, and safe connection status." : "Review your account and safe connection status.");
+
+  document.querySelector("#self-password-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      const payload = await api("/api/auth/password-change", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      state.auth = { required: true, user: null };
+      showToast(payload.message || "Password updated. Sign in again.");
+      render();
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
+  });
+  document.querySelector("#invite-user-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      await api("/api/settings/users/invite", { method: "POST", body: JSON.stringify(body) });
+      event.currentTarget.reset();
+      await loadSettingsData({ usersPage: 1, auditPage: 1 });
+      showToast("Member created.");
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
+  });
+  document.querySelector("#settings-user-search")?.addEventListener("input", (event) => {
+    const search = event.currentTarget.value.trim().toLowerCase();
+    document.querySelectorAll("[data-user-row]").forEach((row) => {
+      row.hidden = search && !row.dataset.userRow.includes(search);
+    });
+  });
+  document.querySelectorAll("[data-user-role]").forEach((select) => {
+    select.addEventListener("change", async () => {
+      const managedUser = state.settingsUsers.find((item) => item.id === select.dataset.userRole);
+      if (!window.confirm(`Change ${managedUser?.email || "this user"} to ${select.value === "admin" ? "Admin" : "User"}?`)) {
+        render();
+        return;
+      }
+      try {
+        await api(`/api/settings/users/${select.dataset.userRole}`, {
+          method: "PATCH",
+          body: JSON.stringify({ role: select.value })
+        });
+        await loadSettingsData();
+        showToast("User role updated.");
+      } catch (error) {
+        showToast(errorMessage(error));
+      }
+    });
+  });
+  document.querySelectorAll("[data-toggle-user]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const managedUser = state.settingsUsers.find((item) => item.id === button.dataset.toggleUser);
+      const nextActive = button.dataset.nextActive === "true";
+      if (!window.confirm(`${nextActive ? "Reactivate" : "Deactivate"} ${managedUser?.email || "this user"}?`)) return;
+      try {
+        await api(`/api/settings/users/${button.dataset.toggleUser}`, {
+          method: "PATCH",
+          body: JSON.stringify({ active: nextActive })
+        });
+        await loadSettingsData();
+        showToast(nextActive ? "User reactivated." : "User deactivated.");
+      } catch (error) {
+        showToast(errorMessage(error));
+      }
+    });
+  });
+  document.querySelectorAll("[data-reset-user]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.passwordResetUserId = button.dataset.resetUser;
+      render();
+    });
+  });
+  document.querySelectorAll("[data-cancel-password-reset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.passwordResetUserId = "";
+      render();
+    });
+  });
+  document.querySelector("[data-password-modal]")?.addEventListener("click", (event) => {
+    if (event.target !== event.currentTarget) return;
+    state.passwordResetUserId = "";
+    render();
+  });
+  document.querySelector("#managed-password-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      const payload = await api(`/api/settings/users/${state.passwordResetUserId}/password-reset`, {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+      state.passwordResetUserId = "";
+      await loadSettingsData();
+      showToast(payload.message || "Password updated.");
+    } catch (error) {
+      showToast(errorMessage(error));
+    }
+  });
+  document.querySelectorAll("[data-users-page]").forEach((button) => {
+    button.addEventListener("click", () => loadSettingsData({
+      usersPage: Number(button.dataset.usersPage),
+      auditPage: state.settingsAuditPagination.page
+    }));
+  });
+  document.querySelectorAll("[data-audit-page]").forEach((button) => {
+    button.addEventListener("click", () => loadSettingsData({
+      usersPage: state.settingsUsersPagination.page,
+      auditPage: Number(button.dataset.auditPage)
+    }));
+  });
+
+  if (isAdmin && !state.settingsDataLoaded && !state.settingsDataLoading) {
+    loadSettingsData();
+  }
+}
+
 function renderReports() {
   const rows = state.reports.map((report) => `
     <tr>
@@ -1055,4 +1438,3 @@ function renderReports() {
 load().catch((error) => {
   app.innerHTML = `<div class="content"><div class="panel"><h1>Unable to load app</h1><p>${escapeHtml(error.message)}</p></div></div>`;
 });
-

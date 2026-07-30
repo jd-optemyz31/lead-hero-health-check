@@ -92,6 +92,35 @@ button {
   line-height: 20px;
 }
 
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 22px 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--divider);
+}
+
+.security-note {
+  margin: 16px 0 0 !important;
+  padding: 11px 12px;
+  border: 1px solid var(--gold-border);
+  border-radius: 8px;
+  background: var(--gold-soft);
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+  line-height: 18px !important;
+}
+
 .sidebar {
   position: sticky;
   top: 0;
@@ -243,6 +272,10 @@ button {
 
 .grid.six {
   grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.grid.blast-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
 .panel,
@@ -450,6 +483,25 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+.compact-select {
+  min-width: 104px;
+  min-height: 32px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.search-input {
+  width: min(100%, 260px);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--border);
@@ -626,6 +678,27 @@ tr:last-child td {
   background: var(--surface-subtle);
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(16, 18, 20, 0.58);
+}
+
+.password-modal {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 20px 50px rgba(16, 18, 20, 0.24);
+}
+
 .toast {
   position: fixed;
   right: 20px;
@@ -676,6 +749,7 @@ tr:last-child td {
   .grid.two,
   .grid.three,
   .grid.six,
+  .grid.blast-metrics,
   .form-grid,
   .form-grid.three {
     grid-template-columns: 1fr;
@@ -686,6 +760,14 @@ tr:last-child td {
     align-items: flex-start;
     flex-direction: column;
     display: flex;
+  }
+
+  .panel-header {
+    flex-wrap: wrap;
+  }
+
+  .search-input {
+    width: 100%;
   }
 }
 

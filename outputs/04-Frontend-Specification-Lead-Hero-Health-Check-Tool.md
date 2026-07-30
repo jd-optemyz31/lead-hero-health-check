@@ -57,8 +57,8 @@ Main elements:
 - Add Client button
 - Search input
 - Status indicator for connected/missing setup
-- Admin-only Edit action for client connection details
-- Admin-only Disconnect action for saved HighLevel connection
+- Admin/User Edit action for client connection details
+- Admin/User Disconnect action for saved HighLevel connection
 - Client detail drawer or page
 
 Fields:
@@ -83,7 +83,7 @@ Use a read-only HighLevel Private Integration Token.
 
 Disconnect behavior:
 
-- Show Disconnect only for admins and only when a token is saved.
+- Show Disconnect to Admin and User accounts only when a token is saved.
 - Require confirmation before disconnecting.
 - Confirmation copy should explain that the action removes the saved token from the Health Check Tool only.
 - Do not imply that the HighLevel account, contacts, opportunities, workflows, or token inside HighLevel will be changed.
@@ -91,7 +91,7 @@ Disconnect behavior:
 
 Edit behavior:
 
-- Show Edit only for admins.
+- Show Edit to Admin and User accounts.
 - Pre-fill all editable fields except the plaintext PIT.
 - On edit, the PIT field should be optional and should say that leaving it blank keeps the saved token.
 - Saving client metadata should not call HighLevel.
@@ -136,7 +136,7 @@ Main elements:
 - Date range selector
 - Reply tag input
 - Optional workflow name or ID input
-- Optional blast message phrase input
+- Required blast message phrase input
 - Run Analysis button
 - Results summary
 - Reply classification table
@@ -145,7 +145,8 @@ Main elements:
 
 Result cards:
 
-- Total replied contacts
+- Total reply-tagged contacts
+- Analyzed replies
 - Positive
 - Negative
 - Neutral
@@ -160,6 +161,7 @@ Table columns:
 - Confidence
 - Summary
 - Evidence
+- Offer relevance / DND
 - Method
 - Review status
 
@@ -221,16 +223,35 @@ Main elements:
 
 Purpose:
 
-Manage users, API settings, and safe defaults.
+Provide safe account controls and connection status to both roles, plus user administration and security events to Admin.
 
-Main elements:
+User Settings elements:
 
-- Users
-- Roles
-- ClickUp API connection status
-- AI classification connection status
-- HighLevel API version
-- Security settings
+- Current email and role
+- Self-service password-change form requiring current password, new password, and confirmation
+- Safe HighLevel, ClickUp, AI, storage, and authentication status
+- No credential, token, password, IP address, session, Auth metadata, or raw-conversation values
+
+Additional Admin Settings elements:
+
+- Searchable, paginated user directory
+- Email, role, active status, created date, and last sign-in
+- Invite user form with email, role selector defaulting to User, initial password, confirmation, and the acting Admin's current password
+- Role change, deactivate/reactivate, and password-reset actions
+- Confirmation dialogs for role changes and deactivation
+- Paginated sanitized security audit events
+
+Environment-managed Admins and the signed-in Admin's own role/status controls are disabled. Permanent deletion is not offered.
+
+Invite user creates a confirmed account immediately and sends no email. Admin password reset opens a password form for an active non-self account and requires the acting Admin's current password. Password fields are cleared after submission and password values are never displayed afterward.
+
+### Login And Password Management
+
+- The login screen has no signup form or signup link.
+- The login screen has no forgot-password or email-recovery form; locked-out users contact an Admin.
+- The self-service form requires the current password, a matching confirmation, and 12 to 128 characters.
+- A successful self-service change clears the current session and requires a fresh login.
+- The Admin reset form cannot target the signed-in Admin; that account uses self-service Change password.
 
 ## Design System
 
@@ -443,6 +464,8 @@ Outputs:
 - Short summary
 - Evidence excerpt or evidence message IDs
 - Confidence
+- Offer relevance: Promoted service, Different service, or Unclear
+- Read-only HighLevel DND indicator and channel when applicable
 - Method: AI, rules fallback, or sample
 - Review status
 
@@ -454,15 +477,15 @@ Allowed labels:
 - Opt-out
 - Needs review
 
-AI should classify intent semantically rather than by a fixed phrase list. Needs review should be reserved for genuinely unclear replies, missing/contradictory text, or call-record replies where the text does not show whether the contact was positive or negative.
+AI should classify the customer's overall intent toward the service promoted in the actual matched outbound blast across the complete post-blast conversation rather than a fixed phrase list or only the latest reply. Positive includes genuine interest in the promoted service, relevant pricing/detail questions, relevant service questions, next-step requests, and willingness to visit, book, or continue for that service. Negative requires a clear decline, rejection, or explicit lack of interest in the promoted offer. A different-service-only inquiry is Neutral because it neither accepts nor rejects that offer. Temporary deferrals such as `not ready right now`, acknowledgements such as `okay, thanks`, and identity questions such as `who is this` are also Neutral unless the wider conversation supports another label. Overall/channel-specific HighLevel DND, a standalone `STOP`, or an unambiguous stop-contact request takes Opt-out precedence. Normal language such as `I'll stop by tomorrow` is not an opt-out. Needs review is exceptional and should be reserved for no usable inbound text, call-only evidence without text intent, or a genuinely irreconcilable conversation.
 
-For live HighLevel analysis, AI should use a bounded post-blast thread. When the blast phrase is matched, the result row can indicate how many post-blast messages were reviewed and that the thread was anchored to the matched blast.
+For live HighLevel analysis, the blast phrase is required as a distinctive matching anchor; users do not need to paste the full blast twice. The server automatically extracts the actual matched outbound blast as the promoted-offer context. AI should receive that offer and every exported message from the matched outbound blast onward inside the selected date range as a structured in-memory JSON conversation. The complete conversation is the primary evidence; outbound messages are context and inbound messages express customer intent. Every reply-tagged candidate should appear in the table. Contacts without a matching outbound blast must not use an unanchored fallback and should show `Not analyzed — No blast match`; contacts with a matching blast but no later inbound message should show `Not analyzed — No post-blast reply`. The result row should indicate offer relevance or read-only HighLevel DND state, how many post-blast messages were reviewed, and whether the thread was anchored to the matched blast.
 
 Frontend behavior:
 
 - AI classification should be editable by the user.
-- Any uncertain result should be marked Needs review.
-- The Blast Analyzer results table should show Contact, Last reply date, Classification, Confidence, Summary, Evidence, Method, and Review status.
+- Only genuinely unusable or irreconcilable conversations should be marked Needs review; ordinary uncertainty, brevity, or hesitation should normally resolve to Neutral.
+- The Blast Analyzer results table should be headed All tagged contacts and show Contact, Last reply date, Classification, Confidence, Summary, Evidence, Offer relevance / DND, Method, and Review status.
 - The Settings screen should show whether AI classification is connected without exposing the OpenAI API key.
 
 ## Empty States
@@ -507,6 +530,7 @@ Because live blast analysis runs as a background job, the Blast Analyzer has its
 - Once contacts are fetched, the panel updates to "Classifying contacts... X of Y" and counts up as each contact is classified.
 - When the job completes, the results appear automatically and the button re-enables.
 - If the job errors, an error toast is shown and the button re-enables.
+- If the read-only contact scan reaches its 50,000-contact safety ceiling, show a clear incomplete-scan error and do not display the partial population as a completed analysis.
 
 ## Validation Rules
 
@@ -515,9 +539,11 @@ Because live blast analysis runs as a background job, the Blast Analyzer has its
 - HighLevel PIT token is required.
 - HighLevel PIT token is required when adding a new client, but optional when editing an existing client with a saved token.
 - ClickUp task ID is required before posting.
-- Blast Analyzer requires client, date range, and reply tag.
+- Blast Analyzer requires client, date range, reply tag, and blast message phrase.
 - Monthly Check requires client and date range.
 - Date end cannot be before date start.
+- Invite user requires a valid email, Admin/User role, initial password confirmation, and the acting Admin's current password.
+- Password and confirmation must match and contain 12 to 128 characters; self-service changes also require the current password.
 
 ## Accessibility
 

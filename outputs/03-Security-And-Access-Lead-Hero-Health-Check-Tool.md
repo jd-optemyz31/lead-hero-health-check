@@ -14,10 +14,9 @@ HighLevel is read-only. ClickUp is the only write destination.
 
 Users should log in before accessing the app.
 
-Recommended MVP authentication:
+Current MVP authentication:
 
-- Supabase Auth with Google login restricted to approved company domains, or
-- Supabase Auth email/password with enforced invite-only access
+- Supabase Auth email/password with enforced Admin-provisioned access
 
 Public signup should not be enabled.
 
@@ -26,11 +25,17 @@ Supabase Auth is the preferred MVP option if the app also uses Supabase Postgres
 Required authentication settings:
 
 - Disable public signup unless explicitly approved.
-- Require invite-only users or approved company-domain Google login.
-- Require MFA for Admin users before production client data is added.
-- Keep Admin, Operator / CAM, and Viewer roles server-enforced; do not rely on frontend-only role checks.
+- Require Admin-created accounts through the in-tool Invite user workflow.
+- Keep Admin and User roles server-enforced; do not rely on frontend-only role checks or user-editable Auth metadata.
 - Set short session lifetimes or enforced re-authentication for sensitive actions such as adding/replacing HighLevel PIT tokens.
 - Never expose Supabase service role keys to the browser.
+- Do not expose email invitation, forgot-password, or recovery-link flows.
+- Require current-password reauthentication for account creation, self-service password changes, and Admin-managed resets.
+- Send initial and replacement passwords only to Supabase Auth. Never store them in application tables, return or redisplay them, or include them in audit events.
+- A locked-out user must contact an Admin. Recovery of a locked-out sole Admin is an authorized Supabase operator procedure outside this application.
+- Admin-managed reset does not instantly invalidate an already-issued target access token; keep the Auth access-token lifetime short. The current application session lifetime is approximately one hour.
+- MFA is not implemented. Do not represent this release as MFA-protected.
+- Supabase leaked-password protection remains disabled while the connected organization is on the Free plan; enabling it requires an approved plan upgrade.
 
 ## User Roles
 
@@ -38,8 +43,10 @@ Required authentication settings:
 
 Can:
 
-- Manage users
-- Add/edit clients
+- View the user directory and sanitized security audit events
+- Invite/create, deactivate/reactivate, and change other users
+- Set a new password for any other active account after Admin reauthentication
+- Add/edit all clients
 - Add/edit HighLevel PIT tokens
 - Disconnect client HighLevel tokens from this tool
 - Add/edit ClickUp task IDs
@@ -54,38 +61,34 @@ Cannot:
 - Send outbound communication through HighLevel
 - Modify contacts, workflows, opportunities, tags, or conversations in HighLevel
 
-### Operator / CAM
+### User
 
 Can:
 
-- View assigned clients
+- View and manage all clients
+- Add/edit/disconnect encrypted HighLevel PIT tokens in this tool
+- Configure routing setup
 - Run monthly checks
 - Run Blast Analyzer
 - Review generated reports
-- Post comments to ClickUp if allowed
+- Post reviewed comments to ClickUp
+- Change their own password after current-password reauthentication
 
 Cannot:
 
-- Edit HighLevel tokens unless granted
 - Manage users
-- Change global settings
+- View the user directory or security audit events
 - Send outbound communication through HighLevel
 
-### Viewer / Leadership
+Both roles have global client access. `client_assignments` rows remain stored but do not grant or restrict access.
 
-Can:
+### Admin Management Guards
 
-- View client health summaries
-- View monthly reports
-- View blast analysis summaries
-
-Cannot:
-
-- Edit clients
-- Run API checks
-- Post to ClickUp
-- Manage tokens
-- Send outbound communication
+- `ADMIN_EMAILS` accounts are protected bootstrap Admins and cannot be deactivated or changed to User in the app.
+- An Admin cannot deactivate themselves or change their own role.
+- Another Admin must perform those actions.
+- The server refuses any action that would leave no active Admin, and the database repeats this guard transactionally to cover concurrent changes.
+- Permanent deletion is not exposed.
 
 ## HighLevel Access Rules
 
@@ -360,9 +363,9 @@ Private Integration Tokens must:
 - Never be shown again in plain text after saving
 - Never appear in logs
 - Never be sent to the browser after initial entry
-- Be removable or replaceable by admins
+- Be removable or replaceable by active Admin or User accounts
 
-Client-specific HighLevel PITs should be entered through an authenticated Admin-only Clients screen. They should not be hardcoded, committed to Git, stored in frontend files, or placed in Railway environment variables per client. Railway variables are for app-wide secrets only.
+Client-specific HighLevel PITs should be entered through the authenticated Clients screen by an Admin or User. They should not be hardcoded, committed to Git, stored in frontend files, or placed in Railway environment variables per client. Railway variables are for app-wide secrets only.
 
 Recommended production storage:
 
@@ -375,7 +378,7 @@ Recommended production storage:
 
 Edit behavior:
 
-- Admins may edit client connection details such as timezone, location ID, ClickUp task ID, and automation-flow settings.
+- Admins and Users may edit client connection details such as timezone, location ID, ClickUp task ID, and automation-flow settings.
 - When editing an existing client, leaving the PIT field blank must preserve the existing encrypted token.
 - Entering a new PIT replaces the saved encrypted token.
 - The frontend must never pre-fill, reveal, or return the existing plaintext PIT.
@@ -383,7 +386,7 @@ Edit behavior:
 
 Disconnect behavior:
 
-- Admins may disconnect a client from HighLevel inside this tool.
+- Admins and Users may disconnect a client from HighLevel inside this tool.
 - Disconnecting must only clear the encrypted PIT and token preview from the app database.
 - Disconnecting must not call HighLevel, revoke tokens through HighLevel, delete contacts, update account settings, or change any client CRM data.
 - Existing reports, routing setup, ClickUp task IDs, and client metadata should remain available.
@@ -409,9 +412,12 @@ AI classification is allowed only for Blast Analyzer reply analysis. The browser
 
 AI requests may include:
 
-- The selected blast message phrase or short blast context.
-- A bounded, capped post-blast message thread for the matching contact inside the selected date range.
-- The latest reply text excerpt needed for fallback evidence.
+- The required blast message phrase used only to identify the outbound blast.
+- The actual matched outbound blast, automatically extracted by the server and bounded as the promoted-offer context.
+- Every exported message for the matching contact from the matched blast onward inside the selected date range, with per-message text bounded for the AI request.
+- Message direction, timestamp, channel, and text serialized as a structured in-memory JSON payload so inbound customer intent remains distinguishable from outbound context.
+
+The server may read overall and channel-specific DND fields already present in the HighLevel contact response. DND is evaluated locally before the AI request and is never used to mutate the contact. Active or permanent DND for the matched blast channel, or overall DND, is classified as Opt-out without sending that contact's conversation to the AI provider.
 
 AI requests must not include:
 
@@ -425,9 +431,13 @@ AI requests must not include:
 - Unrelated contacts' conversations.
 - Any instruction to send a message, update a contact, add/remove tags, move an opportunity, or trigger a workflow.
 
-AI provider failures, timeouts, invalid JSON, and missing API keys should fall back to local rules. Ambiguous, contradictory, missing-text, or call-record replies should be marked `Needs review` and reviewed by a human before being included in a monthly ClickUp comment.
+AI provider failures, timeouts, invalid JSON, and missing API keys should fall back to conversation-level local rules. `Needs review` should be limited to no usable inbound customer text, call-only evidence without text intent, or genuinely irreconcilable conversations, and should be reviewed by a human before being included in a monthly ClickUp comment. Short or cautious customer messages alone are not sufficient to force `Needs review`.
 
-When OpenRouter cannot route strict structured-output parameters for a selected model, the server may retry once with a JSON-only chat request. This retry must follow the same data boundary: only the minimal reply excerpt and optional blast phrase are sent, and no HighLevel PITs, ClickUp tokens, Supabase service keys, or app secrets are included.
+Every reply-tagged contact may be represented in the results, but only contacts with a matched outbound blast and a later inbound message may be classified. Diagnostic rows for `No blast match` and `No post-blast reply` contain sanitized status text only; they must not persist an unanchored raw conversation or send one to the AI provider.
+
+Fallback contact pagination remains read-only and bounded to 50,000 contacts. If the 500-page ceiling is reached, the Blast Analyzer must stop with a sanitized incomplete-scan error instead of treating the partial result as complete.
+
+When OpenRouter cannot route strict structured-output parameters for a selected model, the server may retry with JSON-only and then plain-text structured instructions. Each retry must follow the same data boundary: only the required blast anchor phrase, the automatically extracted matched outbound offer, and the structured post-blast selected-window conversation are sent. No HighLevel PITs, ClickUp tokens, Supabase service keys, app secrets, or DND metadata are included. The structured JSON exists only in the provider request and is not written as a raw-conversation file.
 
 ### Encryption
 
@@ -481,22 +491,21 @@ For the current MVP, set `AUTH_REQUIRED=true` in Railway. `SUPABASE_SERVICE_ROLE
 
 ## Row-Level Access Rules
 
-If using Supabase or another database with row-level security, apply these rules:
+The current Supabase model applies these rules:
 
-- Users can only read clients assigned to them unless they are admins.
-- Only admins can create or edit clients.
-- Only admins can manage HighLevel tokens.
-- Operators can create monthly checks and blast analyses for assigned clients.
-- Viewers can read reports for assigned clients only.
-- Audit logs are read-only for non-admins.
+- Active Admin and User accounts have global client access.
+- Both roles can create/edit clients and routing setup, run checks, create blast analyses/reports, and post reviewed ClickUp comments.
+- Existing client assignments are preserved but are not used for authorization.
+- Only Admin can manage users or read security audit events.
+- Browser roles have no direct application-table privileges; the server uses the service role, and RLS remains enabled as defense in depth.
 
 Supabase Row-Level Security should be enabled on all production tables containing client data, tokens, reports, evidence, audit logs, or user-role mappings. The backend should still enforce authorization checks even when RLS is enabled.
 
 Minimum table policy expectations:
 
-- `clients`: Admins can create/update; assigned users can read limited client metadata; encrypted token fields should not be selected by browser-facing queries.
-- `routing_setups`: Admins can create/update; assigned Operators can read.
-- `monthly_checks` and `blast_analyses`: assigned Operators can create/read; Viewers can read; only allowed roles can post reviewed reports.
+- `clients`: active Admin and User can access all clients; encrypted token fields must not be selected by browser-facing queries.
+- `routing_setups`, `monthly_reports`, and `blast_analyses`: active Admin and User can create/read/update as required by the application.
+- `app_users`: self-read or Admin-read; Admin-only insert/update; no permanent-delete application workflow.
 - `api_audit_logs`: insert from server only; read by Admin only.
 - Token fields: server-side access only. Do not expose encrypted tokens to frontend queries just because they are encrypted.
 
@@ -574,6 +583,10 @@ If `New form submission` is missing but workflow messages exist, the tool should
 
 The Blast Analyzer must use the selected date range to avoid mixing older replies with the current blast.
 
+### Ambiguous `stop` Language
+
+Only a standalone `STOP`, `please stop`, or an unambiguous stop-contact instruction is a message-level opt-out. Ordinary positive language such as `I'll stop by tomorrow` must not be classified as Opt-out. Read-only HighLevel overall/channel DND remains an independent deterministic opt-out signal.
+
 ### Duplicate ClickUp Posting
 
 If a report was already posted, the app should require confirmation before posting again.
@@ -598,6 +611,9 @@ The app should log:
 - Blast analysis generated
 - ClickUp comment posted
 - API errors
+- Successful and failed Admin-created accounts
+- User role and active-status changes, including blocked attempts
+- Self-service password changes and Admin-managed resets
 
 Logs should never include HighLevel PIT tokens, ClickUp tokens, full message bodies unless needed for evidence, or sensitive contact details beyond IDs/references.
 
@@ -614,7 +630,10 @@ Recommended MVP policy:
 
 - App has authentication enabled.
 - Public signup is disabled.
-- Supabase schema in `supabase/schema.sql` has been applied.
+- No email invitation, forgot-password, or recovery-link routes are exposed.
+- Account creation and password changes require acting-user reauthentication and use server-only Supabase Auth administration.
+- MFA is not claimed as implemented.
+- Approved files in `supabase/migrations/` have been applied and reviewed; `supabase/schema.sql` matches them as a reference mirror.
 - `AUTH_REQUIRED=true` is set in Railway.
 - `ADMIN_EMAILS` contains the initial trusted admin account only.
 - Supabase service role key is server-only and never sent to the browser.

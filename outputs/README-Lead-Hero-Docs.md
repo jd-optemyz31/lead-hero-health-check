@@ -31,15 +31,25 @@ The tool must not create or update opportunities, tags, contacts, workflows, or 
 
 ## Client Disconnect Decision
 
-Admins can disconnect a client from live HighLevel checks by removing the saved HighLevel Private Integration Token from this tool. This does not call HighLevel and does not change the client's HighLevel account.
+Admins and Users can disconnect a client from live HighLevel checks by removing the saved HighLevel Private Integration Token from this tool. This does not call HighLevel and does not change the client's HighLevel account.
 
 ## Client Edit Decision
 
-Admins can edit client connection details, including timezone and automation-flow fields. Timezone should be selected from IANA timezone IDs. On edit, leaving the PIT field blank keeps the saved encrypted token; entering a new PIT replaces it.
+Admins and Users can edit client connection details, including timezone and automation-flow fields. Timezone should be selected from IANA timezone IDs. On edit, leaving the PIT field blank keeps the saved encrypted token; entering a new PIT replaces it.
+
+## Authentication And Settings Decision
+
+The application has two roles: Admin and User. Both can manage all clients, run health checks and Blast Analyzer, and post reviewed ClickUp comments. Only Admin can view/manage the user directory and view security audit events. Both roles can change their own password; an Admin can set a new password for any other active account.
+
+Public signup is disabled and the Admin-only Invite user form is the only new-account path. It creates a confirmed Supabase Auth member with an Admin-set initial password and sends no email. Legacy Operator and Viewer records migrate to User, while existing client assignments remain stored but no longer authorize access. `ADMIN_EMAILS` accounts remain protected bootstrap Admins, self-role/status changes are blocked, and the server preserves at least one active Admin.
+
+Account creation, self-service password changes, and Admin-managed resets require the acting user's current password. New passwords require 12 to 128 characters with confirmation and go only to Supabase Auth; the application never stores, returns, redisplays, or audits them. There is no forgot-password or email-recovery flow. A locked-out user needs an Admin; a locked-out sole Admin requires authorized Supabase recovery outside the tool. MFA is not implemented.
 
 ## AI Blast Analysis Decision
 
-Blast Analyzer can use OpenAI directly or through OpenRouter from the server only when an approved AI key is configured. OpenRouter mode uses `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and an OpenRouter model ID such as `openai/gpt-5.4-nano`. Results are presented as summary cards plus a reply table with classification, confidence, summary, evidence, method, and review status. AI should classify reply intent semantically rather than by a fixed phrase list. For live analysis, AI receives only bounded post-blast conversation context for the matching contact, not full conversation history. If AI is unavailable, the tool uses rules fallback; if AI cannot explicitly determine intent or the reply is a call record, it marks the reply as `Needs review`.
+Blast Analyzer can use OpenAI directly or through OpenRouter from the server only when an approved AI key is configured. OpenRouter mode uses `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and `OPENAI_MODEL=openai/gpt-5.6-luna`. Results are presented as summary cards plus an All tagged contacts table with classification, confidence, summary, evidence, offer relevance or DND, method, and review status. Every reply-tagged contact is listed; only contacts with a matched outbound blast and a later inbound reply are classified. Missing matches remain visible as sanitized `Not analyzed` diagnostics. AI classifies the customer's overall semantic and emotional intent toward the specific promoted service across the complete post-blast conversation rather than only the latest inbound reply. For live analysis, the blast message phrase remains the required distinctive matching anchor; the server automatically extracts the actual matched outbound blast as the promoted-offer context and serializes every exported message from that blast onward within the selected date range as a structured in-memory JSON request, not a saved raw-conversation file. Promoted-service interest is Positive, different-service-only inquiries are Neutral for that blast, and clear rejection is Negative. Read-only HighLevel overall/channel DND, standalone `STOP`, and unambiguous stop-contact requests take Opt-out precedence, while normal language such as `stop by tomorrow` does not. Needs review is exceptional and is limited to missing usable inbound text, call-only evidence without text intent, or genuinely irreconcilable conversations. Contacts without a matching outbound blast do not use an unanchored fallback. If AI is unavailable, the tool uses the conversation-level rules fallback.
+
+If HighLevel does not honor the direct tag filter, the server paginates read-only contacts and applies the tag locally. The fallback scan is bounded at 50,000 contacts and fails explicitly at that ceiling so a partial contact population is never presented as complete.
 
 The server makes up to three classification attempts per contact: (1) strict JSON schema, (2) relaxed json_object, (3) plain text. Reasoning models that return `content: null` are handled by extracting classification from the `reasoning` field. `max_tokens` is set to 1500 to give reasoning models enough budget to output their answer after thinking.
 

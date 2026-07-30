@@ -10,6 +10,8 @@ The tool is a private internal web app that reads data from HighLevel through Pr
 
 HighLevel is treated as a read-only evidence source. The app must not send outbound communication or mutate CRM records.
 
+Current implementation: a plain Node.js server in `server.mjs`, a static frontend in `public/app.js`, server-only Supabase access, and OpenRouter as the configured AI provider.
+
 ```text
 User
   |
@@ -67,17 +69,17 @@ Reason:
 
 ### Authentication
 
-Supabase Auth is the recommended production MVP choice if Supabase Postgres is used.
+The current implementation uses Supabase Auth email/password with public signup disabled. The Admin-only Invite user form creates confirmed Auth users manually with an Admin-set initial password; no invitation email is sent.
 
-Use Google login restricted to approved company domains or invite-only email/password. Public signup should stay disabled. Admin users should use MFA before real client data or HighLevel PIT tokens are stored.
+The server resolves `admin` or `user` from `app_users` on every authenticated request. User-editable Auth metadata is not an authorization source. `ADMIN_EMAILS` remains a protected bootstrap Admin allowlist.
 
 Reason:
 
 - Auth and Postgres live in the same platform.
 - Supabase Auth integrates cleanly with Postgres Row-Level Security.
-- User identity can be tied to client assignments, user roles, report access, and audit logs.
+- User identity is tied to server-enforced roles and audit logs.
 
-Auth alternatives such as Clerk or Auth.js are still viable, but they add more integration work if the database uses Supabase RLS.
+Both roles have global client access. Existing `client_assignments` rows are preserved for history but are not used for authorization. MFA is not implemented in this release.
 
 ### AI Reply Classification
 
@@ -92,19 +94,25 @@ Current MVP implementation:
 - OpenRouter uses the OpenAI-compatible Chat Completions API at `https://openrouter.ai/api/v1/chat/completions`.
 - `AI_PROVIDER`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` are Railway/server variables and are never sent to the browser.
 - API key values are trimmed on read to guard against whitespace that Railway or other secret managers may append.
-- The request uses a strict JSON schema for `classification`, `summary`, `evidence`, `confidence`, and `reviewStatus` where the provider can route those parameters.
+- The request uses a strict JSON schema for `classification`, `serviceRelevance`, `relevanceReason`, `summary`, `evidence`, `confidence`, and `reviewStatus` where the provider can route those parameters.
 - In OpenRouter mode, the server makes up to three attempts before falling back to local rules: (1) strict JSON schema request with `require_parameters: true`; (2) relaxed `json_object` request if the strict attempt fails due to provider routing; (3) plain-text request with no `response_format` if the relaxed attempt returns an unrecognizable response.
 - `max_tokens` is set to `1500` to accommodate reasoning models that output chain-of-thought before the final JSON answer. Models that use a `reasoning` or `reasoning_details` field and return `content: null` are handled by extracting classification from the reasoning text as a last resort.
 - The server handles response payloads where `message.content` is already a parsed object rather than a JSON string, and unwraps one level of nesting if the model wraps its response in a container key such as `{ "result": { "classification": ... } }`.
 - The only allowed labels are `Positive`, `Neutral`, `Negative`, `Opt-out`, and `Needs review`.
 - The server normalizes common AI label variants, such as lowercase labels, `opt_out`, and `needs_review`, into the approved labels before saving or displaying results.
 - If the AI provider returns a partial response with no valid classification label, the server must reject that AI result and mark the row as rules fallback instead of displaying a mixed AI/fallback row.
-- AI classification uses semantic intent rather than a hardcoded phrase list. The local phrase-based classifier is only a fallback when AI is not configured or an AI request fails.
-- `Needs review` is reserved for cases where AI cannot explicitly determine intent, reply text is missing or contradictory, or the latest inbound evidence is a call record instead of text.
-- Only bounded blast-relevant conversation context should be sent to the AI service. The server tries to anchor the thread at the optional blast phrase and sends only capped messages after that blast within the selected date range; if no phrase is available, it sends only a capped selected-window thread for that contact. HighLevel PITs, ClickUp tokens, Supabase keys, full account exports, and unrelated contact history must never be sent.
+- AI classification uses semantic and emotional intent toward the specific promoted service across the complete post-blast conversation rather than a hardcoded phrase list or only the latest inbound reply. The local phrase-based conversation classifier is only a fallback when AI is not configured or an AI request fails.
+- The required short phrase is only the matching anchor. Once an outbound message matches, the server automatically passes the actual matched outbound message separately as `promotedOffer`; users do not paste the full blast twice.
+- `Positive` applies when inbound customer intent concerns the promoted service. `Negative` requires a clear decline, rejection, or explicit lack of interest in the promoted offer. Different-service-only inquiries are `Neutral` because they neither accept nor reject that offer. Temporary deferrals, acknowledgements, and identity questions are also `Neutral` unless the wider conversation supports another label.
+- Before calling AI, the server applies read-only HighLevel DND state from the contact search result. Overall DND or `active`/`permanent` DND for the matched blast channel is deterministically `Opt-out`. A standalone `STOP` or an unambiguous stop-contact request is also `Opt-out`; the bare word `stop` inside normal language such as `stop by tomorrow` is not.
+- The server validates AI output so `Different service` resolves to Neutral for the promoted blast and deterministic opt-out signals retain precedence.
+- Contact accounting and reply classification are separate. The server returns one result row for every reply-tagged contact. Rows without a matched outbound blast or without a later inbound message are retained as `Not analyzed` diagnostics and are excluded from the five classification totals.
+- Blast contact retrieval requests up to 500 pages of 100 contacts, covering up to 50,000 contacts when local tag filtering is required. A full final page triggers an explicit incomplete-scan error rather than allowing the server to save or display a silently truncated population.
+- `Needs review` is exceptional and is reserved for no usable inbound customer text, call-only evidence without text intent, or a genuinely irreconcilable conversation. Clear rule signals prevent AI from overusing `Needs review`.
+- Only blast-relevant conversation context should be sent to the AI service. The blast phrase is required, and the server must match it to an outbound message before serializing the actual matched outbound offer plus every exported message from that blast onward within the selected date range as an in-memory JSON request payload. The tool does not send HighLevel DND metadata to AI because DND is handled deterministically by the server first. There is no raw-conversation file, persisted full thread, or unanchored selected-window fallback. Messages before the matched blast, HighLevel PITs, ClickUp tokens, Supabase keys, full account exports, and unrelated contact history must never be sent.
 - If the AI provider is not configured, times out, or returns an invalid response, the app falls back to the local rule-based classifier, marks the method as `Rules` or `Rules fallback`, and shows a safe fallback reason without exposing keys or raw secrets.
-- For OpenRouter, set `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and `OPENAI_MODEL=openai/gpt-5.4-nano`.
-- For OpenAI direct, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL=gpt-5.4-nano`.
+- For OpenRouter, set `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, and `OPENAI_MODEL=openai/gpt-5.6-luna`.
+- For OpenAI direct, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and an approved model ID supported by the direct OpenAI account.
 
 ### Hosting
 
@@ -131,7 +139,7 @@ Content-Type: application/json
 
 Some endpoints may use newer versions, but the app should centralize the HighLevel API version in config.
 
-Client-specific HighLevel Private Integration Tokens should be entered through an Admin-only Clients screen and stored encrypted in Postgres. They should not be stored in code, frontend files, Git, or Railway variables. Railway variables are for app-wide secrets, not per-client PITs.
+Client-specific HighLevel Private Integration Tokens should be entered through the authenticated Clients screen by an Admin or User and stored encrypted in Postgres. They should not be stored in code, frontend files, Git, or Railway variables. Railway variables are for app-wide secrets, not per-client PITs.
 
 ### HighLevel Access Boundary
 
@@ -201,18 +209,23 @@ Post a comment to a configured ClickUp task.
 
 ## Database Schema
 
-### users
+### app_users
 
 Stores app users.
 
 Fields:
 
 - id
-- name
+- auth_user_id
 - email
-- role
+- role: `admin` or `user`
+- active
 - created_at
 - updated_at
+
+Legacy `operator` and `viewer` values are migrated to `user`. The server continues to resolve the role from this table on every request.
+
+The server checks last-active-Admin mutations before writing. A database trigger serializes Admin demotion/deactivation with a transaction-scoped advisory lock and rejects any concurrent change that would leave no active Admin.
 
 ### clients
 
@@ -246,7 +259,7 @@ Notes:
 
 ### Client Connection API
 
-Admin-only routes:
+Admin and User routes:
 
 ```text
 POST /api/clients
@@ -259,6 +272,33 @@ POST /api/highlevel/test
 `POST /api/clients` also handles edits when an existing client ID is provided. Editable fields include client name, timezone, HighLevel location ID, ClickUp task ID, form lead tag, active pipeline name/ID, first-reply stage name/ID, and reply movement window. The PIT token is required only when creating a new client or replacing a disconnected token. On edit, a blank PIT preserves the existing encrypted token.
 
 The frontend should use a timezone selector backed by IANA timezone IDs. Browsers that support `Intl.supportedValuesOf("timeZone")` can provide the full list without hardcoding it.
+
+### Authentication And Settings APIs
+
+Public authentication routes:
+
+```text
+POST /api/auth/login
+POST /api/auth/logout
+POST /api/auth/password-change
+GET  /api/auth/me
+```
+
+Admin-only routes:
+
+```text
+GET   /api/settings/users
+POST  /api/settings/users/invite
+PATCH /api/settings/users/:id
+POST  /api/settings/users/:id/password-reset
+GET   /api/settings/audit-logs
+```
+
+User-directory responses expose only safe account fields. Account creation and password updates call Supabase Auth Admin APIs only from the server with the service-role key. `POST /api/settings/users/invite` retains the product route name but creates a confirmed user with email, role, and initial password; it does not send email.
+
+The acting user must reauthenticate with their current password before a self-service change, Admin-created account, or Admin-managed reset. Passwords require confirmation and 12 to 128 characters. Password values are transient request data sent to Supabase Auth and are never stored in `app_users`, returned, displayed after submission, or audited. A self-service change revokes the current session, clears the application cookie, and requires a fresh login. An Admin reset does not guarantee immediate invalidation of the target's already-issued access token; the current application token lifetime bounds that exposure to approximately one hour.
+
+No public forgot-password, email invitation, email recovery, signup API, or signup form exists. A locked-out user must contact an Admin. If the only Admin is locked out, an authorized Supabase operator must recover the account outside this application.
 
 ### routing_setups
 
@@ -403,6 +443,10 @@ Examples:
 - blast_analysis_generated
 - clickup_comment_posted
 - highlevel_api_error
+- user.create
+- user.update
+- auth.password_change
+- auth.password_reset
 
 ## Folder Structure
 
@@ -504,7 +548,7 @@ Responsibilities:
 - Search contacts by reply tag and date range where supported
 - Pull conversations for matching contacts
 - Identify relevant replies
-- Classify replies with AI when configured using a bounded post-blast thread, with a local rules fallback
+- Classify replies with AI when configured using the complete exported thread from the required matched blast onward inside the selected date range, with a local rules fallback
 - Store classification, confidence, evidence, method, and review status
 - Save analysis results
 
@@ -548,14 +592,13 @@ OPENROUTER_SITE_URL=
 OPENROUTER_APP_NAME=Lead Hero Health Check Tool
 OPENAI_API_KEY=
 OPENAI_BASE_URL=https://openrouter.ai/api/v1
-OPENAI_MODEL=openai/gpt-5.4-nano
+OPENAI_MODEL=openai/gpt-5.6-luna
 HIGHLEVEL_API_VERSION=2021-07-28
 SUPABASE_URL=
 SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 AUTH_REQUIRED=true
 ADMIN_EMAILS=
-NEXT_PUBLIC_APP_URL=
 AUTH_SECRET=
 ```
 
@@ -575,7 +618,9 @@ Current MVP implementation note:
 - The plain Node server validates users through Supabase Auth and stores the login token in an HTTP-only cookie.
 - The server uses `SUPABASE_SERVICE_ROLE_KEY` only on the backend to read/write the app tables.
 - Frontend code never receives the Supabase service role key or encrypted HighLevel PIT values.
-- Run `supabase/schema.sql` in Supabase before enabling production storage.
+- Apply the committed files in `supabase/migrations/` through the approved migration workflow. `supabase/schema.sql` is a review mirror, not the production apply mechanism.
+- The Admin/User role change is represented by `supabase/migrations/20260729075229_admin_user_roles.sql`; review and apply it only through the approved migration workflow.
+- Public signup remains disabled. The tool does not use authentication email delivery; Admins create accounts and manage passwords through server-enforced in-tool workflows.
 
 ## API Reliability Notes
 
