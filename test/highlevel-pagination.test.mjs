@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { collectPagedHighLevelItems, dailyUtcWindows } from "../src/highlevel-pagination.mjs";
+import {
+  collectCursorPagedHighLevelItems,
+  collectPagedHighLevelItems,
+  dailyUtcWindows
+} from "../src/highlevel-pagination.mjs";
 
 test("collects every contact page until HighLevel returns a short page", async () => {
   const pagesRequested = [];
@@ -60,6 +64,61 @@ test("fails instead of silently returning a partial contact population at the pa
       })
     }),
     /Contact scan incomplete/
+  );
+});
+
+test("cursor pagination continues beyond the 10,000-contact offset window", async () => {
+  const cursors = [];
+  const pages = [
+    {
+      contacts: [{ id: "one" }, { id: "two" }],
+      meta: { startAfter: 200, startAfterId: "two" }
+    },
+    {
+      contacts: [{ id: "three" }, { id: "four" }],
+      meta: { startAfter: 400, startAfterId: "four" }
+    },
+    {
+      contacts: [{ id: "five" }],
+      meta: {}
+    }
+  ];
+
+  const items = await collectCursorPagedHighLevelItems({
+    pageSize: 2,
+    maxPages: 500,
+    failOnPageLimit: true,
+    itemId: (item) => item.id,
+    extractItems: (payload) => payload.contacts,
+    extractCursor: (payload) => payload.meta.startAfter
+      ? { startAfter: payload.meta.startAfter, startAfterId: payload.meta.startAfterId }
+      : null,
+    fetchPage: async (cursor) => {
+      cursors.push(cursor);
+      return pages[cursors.length - 1];
+    }
+  });
+
+  assert.deepEqual(cursors, [
+    null,
+    { startAfter: 200, startAfterId: "two" },
+    { startAfter: 400, startAfterId: "four" }
+  ]);
+  assert.deepEqual(items.map((item) => item.id), ["one", "two", "three", "four", "five"]);
+});
+
+test("cursor pagination fails rather than trusting a full page without a next cursor", async () => {
+  await assert.rejects(
+    collectCursorPagedHighLevelItems({
+      pageSize: 2,
+      maxPages: 500,
+      failOnPageLimit: true,
+      itemId: (item) => item.id,
+      extractItems: (payload) => payload.contacts,
+      extractCursor: () => null,
+      fetchPage: async () => ({ contacts: [{ id: "one" }, { id: "two" }] })
+    }),
+    /full page without a cursor/
   );
 });
 

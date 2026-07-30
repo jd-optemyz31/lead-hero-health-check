@@ -158,9 +158,9 @@ When AI is used, the blast message phrase is required as a distinctive search an
 
 The results table must account for every contact returned with the reply tag. A candidate with no matching outbound phrase is listed as `Not analyzed — No blast match`; a candidate with a matched blast but no later inbound message is listed as `Not analyzed — No post-blast reply`. These diagnostic rows are excluded from Positive, Neutral, Negative, Opt-out, and Needs review counts and are never force-classified from an unanchored conversation.
 
-When HighLevel's direct tag filter is unavailable or unreliable, the server may paginate the read-only contact search and apply the tag locally. The scan has a 50,000-contact safety ceiling and must fail the run if that ceiling is reached; it must never silently save a partial tagged-contact population as complete.
+When HighLevel's direct tag filter is unavailable or unreliable, the server may paginate the read-only contact list and apply the tag locally. HighLevel's page-number contact search is limited to a 10,000-result window, so the fallback must use the read-only Contacts endpoint with `startAfter` and `startAfterId` cursor values to continue beyond that boundary. The scan has a 50,000-contact safety ceiling and must fail the run if that ceiling is reached or a required next-page cursor is missing; it must never silently save a partial tagged-contact population as complete. The browser should keep polling a readable running job instead of abandoning it after a fixed 15-minute client-side timer.
 
-Saved blast analyses should be shown newest first wherever they are selected for a monthly check. Users can clear the currently loaded Blast Analyzer result from the screen so a fresh run can be reviewed without confusion. Clearing the loaded result must not delete the saved analysis from production storage and must not change anything in HighLevel.
+Saved blast analyses should be shown newest first wherever they are selected for a monthly check. On the Blast Analyzer screen, the displayed analysis must always belong to the client currently selected in the Blast form. Changing clients loads only that client's newest saved analysis, or a client-specific empty state when none exists; it must never leave another client's result visible. Users can clear the currently loaded Blast Analyzer result from the screen so a fresh run can be reviewed without confusion. Clearing the loaded result must not delete the saved analysis from production storage and must not change anything in HighLevel.
 
 ### ClickUp Posting
 
@@ -325,15 +325,18 @@ Next Month Focus:
 4. User enters reply tag, such as `Replied to Blast`.
 5. User optionally selects a workflow name/ID and enters the required blast message phrase.
 6. User clicks Run Analysis. For live HighLevel clients, the server starts a background job and returns a job ID immediately. The button changes to "Running..." and the results area shows an in-progress panel.
-7. The frontend polls the job status every 3 seconds. The progress panel updates to show "Classifying contacts... X of Y" as each contact is classified.
+7. The frontend polls the job status every 3 seconds. The progress panel shows an overall percentage, current phase, contextual Lead Hero action verb, and phase-specific count from contact scanning through saving.
 8. Tool finds matching contacts and conversations, automatically extracts each matched outbound blast as the promoted-offer context, and reads overall/channel-specific DND state from the HighLevel contact response.
 9. Active HighLevel DND or an explicit opt-out is classified as Opt-out. Remaining replies are classified against the promoted service with AI when `OPENROUTER_API_KEY` or `OPENAI_API_KEY` is configured, otherwise the built-in rules fallback is used.
 10. When the job completes, every reply-tagged candidate appears in the results. Safely anchored replies are classified; missing blast matches and missing post-blast replies remain visible as Not analyzed diagnostics.
-11. Saved blast analyses appear newest first with saved date and time.
-12. User can clear the currently displayed analysis from the Blast Analyzer screen without deleting it from storage.
-13. Saved blast analysis can later be attached to a monthly report.
+11. The completed result stays associated with the submitted client. Selecting a different client displays only that client's newest saved result, or a client-specific empty state.
+12. Saved blast analyses appear newest first with saved date and time.
+13. User can clear the currently displayed analysis from the Blast Analyzer screen without deleting it from storage.
+14. Saved blast analysis can later be attached to a monthly report.
 
 For live HighLevel checks, the reply tag identifies the candidate contacts, but the selected date range should apply to inbound conversation messages. Older contacts who reply during the selected blast window should still be included.
+
+The live progress panel must represent the actual pipeline rather than a decorative timer. Its phases cover contact scanning, conversation export, outbound-phrase anchoring, reply classification, and saving. Progress text must describe Lead Hero marketing-blast analysis; explosive-engineering terminology is out of scope and must not be used.
 
 ## MVP Scope
 

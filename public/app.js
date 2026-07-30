@@ -29,6 +29,8 @@ const state = {
   selectedReportId: "",
   editingClientId: "",
   editingRoutingId: "",
+  blastClientId: "",
+  blastDraft: {},
   activeBlastAnalysisId: "",
   activeBlastAnalysis: null,
   blastResultsCleared: false,
@@ -429,6 +431,109 @@ function newestFirstByCreatedAt(items = []) {
   return [...items].sort((a, b) => timestampValue(b.createdAt) - timestampValue(a.createdAt));
 }
 
+function selectedBlastClientId() {
+  return state.clients.some((client) => client.id === state.blastClientId)
+    ? state.blastClientId
+    : currentClientId();
+}
+
+function selectedBlastAnalysis(clientId) {
+  if (!clientId || state.blastResultsCleared) return null;
+  const clientAnalyses = newestFirstByCreatedAt(state.blastAnalyses)
+    .filter((item) => item.clientId === clientId);
+  const activeAnalysis = state.activeBlastAnalysis?.clientId === clientId
+    ? state.activeBlastAnalysis
+    : null;
+  const selectedSavedAnalysis = state.activeBlastAnalysisId
+    ? clientAnalyses.find((item) => item.id === state.activeBlastAnalysisId)
+    : null;
+  return activeAnalysis || selectedSavedAnalysis || clientAnalyses[0] || null;
+}
+
+function blastDraftValue(name, fallback = "") {
+  return state.blastDraft[name] === undefined ? fallback : state.blastDraft[name];
+}
+
+function normalizedBlastProgress(progress = {}) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
+  return {
+    phase: String(progress.phase || "initializing"),
+    phaseLabel: String(progress.phaseLabel || "Preparing"),
+    verb: String(progress.verb || "[Calibrating the blast scan...]"),
+    detail: String(progress.detail || "Preparing a read-only HighLevel analysis."),
+    percent,
+    done: Math.max(0, Number(progress.done) || 0),
+    total: Math.max(0, Number(progress.total) || 0),
+    count: Math.max(0, Number(progress.count) || 0)
+  };
+}
+
+function blastProgressCount(progress) {
+  if (progress.phase === "contacts") {
+    return `${progress.count.toLocaleString()} contact${progress.count === 1 ? "" : "s"} inspected`;
+  }
+  if (progress.phase === "messages") {
+    return `${Math.min(progress.done, progress.total)} / ${progress.total} date windows`;
+  }
+  if (progress.phase === "classifying") {
+    return `${Math.min(progress.done, progress.total).toLocaleString()} / ${progress.total.toLocaleString()} contacts`;
+  }
+  return "HighLevel read-only";
+}
+
+function renderBlastProgress(progressValue) {
+  const progress = normalizedBlastProgress(progressValue);
+  return `
+    <section class="panel blast-progress-panel" aria-live="polite">
+      <div class="blast-progress-header">
+        <div>
+          <div class="blast-progress-kicker"><span class="progress-pulse" aria-hidden="true"></span> Live analysis</div>
+          <h2 id="blast-progress-verb">${escapeHtml(progress.verb)}</h2>
+          <p id="blast-job-progress">${escapeHtml(progress.detail)}</p>
+        </div>
+        <strong id="blast-progress-percent" class="blast-progress-percent">${progress.percent}%</strong>
+      </div>
+      <div
+        id="blast-progress-track"
+        class="blast-progress-track"
+        role="progressbar"
+        aria-label="Blast analysis progress"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="${progress.percent}"
+        aria-valuetext="${escapeHtml(`${progress.phaseLabel}: ${progress.detail}`)}"
+      >
+        <div id="blast-progress-fill" class="blast-progress-fill" style="width: ${progress.percent}%"></div>
+      </div>
+      <div class="blast-progress-meta">
+        <span id="blast-progress-phase">${escapeHtml(progress.phaseLabel)}</span>
+        <span id="blast-progress-count">${escapeHtml(blastProgressCount(progress))}</span>
+      </div>
+    </section>
+  `;
+}
+
+function updateBlastProgress(progressValue) {
+  const progress = normalizedBlastProgress(progressValue);
+  if (state.blastJob) state.blastJob.progress = progress;
+  const verb = document.querySelector("#blast-progress-verb");
+  const detail = document.querySelector("#blast-job-progress");
+  const percent = document.querySelector("#blast-progress-percent");
+  const track = document.querySelector("#blast-progress-track");
+  const fill = document.querySelector("#blast-progress-fill");
+  const phase = document.querySelector("#blast-progress-phase");
+  const count = document.querySelector("#blast-progress-count");
+  if (!verb || !detail || !percent || !track || !fill || !phase || !count) return;
+  verb.textContent = progress.verb;
+  detail.textContent = progress.detail;
+  percent.textContent = `${progress.percent}%`;
+  track.setAttribute("aria-valuenow", String(progress.percent));
+  track.setAttribute("aria-valuetext", `${progress.phaseLabel}: ${progress.detail}`);
+  fill.style.width = `${progress.percent}%`;
+  phase.textContent = progress.phaseLabel;
+  count.textContent = blastProgressCount(progress);
+}
+
 function formatSavedAt(value) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return "saved time unknown";
@@ -736,8 +841,16 @@ function renderClients() {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
     try {
+      const previousClientIds = new Set(state.clients.map((client) => client.id));
       const payload = await api("/api/clients", { method: "POST", body: JSON.stringify(body) });
       state.clients = payload.clients;
+      if (!body.id) {
+        const addedClient = state.clients.find((client) => !previousClientIds.has(client.id));
+        if (addedClient) {
+          state.blastClientId = addedClient.id;
+          state.blastDraft = { ...state.blastDraft, clientId: addedClient.id };
+        }
+      }
       state.editingClientId = "";
       showToast(body.id ? "Client details updated." : "Client saved.");
     } catch (error) {
@@ -807,18 +920,16 @@ function renderClients() {
 
 function pollBlastJob(jobId) {
   let consecutiveFailures = 0;
-  const startedAt = Date.now();
   const interval = setInterval(async () => {
     try {
       const job = await api(`/api/blasts/job/${jobId}`);
       consecutiveFailures = 0;
-      const progressEl = document.querySelector("#blast-job-progress");
-      if (progressEl && job.status === "running" && job.progress.total > 0) {
-        progressEl.textContent = `Classifying contacts... ${job.progress.done} of ${job.progress.total}`;
-      }
+      if (job.status === "running") updateBlastProgress(job.progress);
       if (job.status === "done") {
         clearInterval(interval);
         state.blastJob = null;
+        state.blastClientId = job.analysis.clientId;
+        state.blastDraft = { ...state.blastDraft, clientId: job.analysis.clientId };
         state.activeBlastAnalysis = job.analysis;
         state.blastAnalyses = newestFirstByCreatedAt([
           job.analysis,
@@ -837,25 +948,21 @@ function pollBlastJob(jobId) {
       }
     } catch {
       consecutiveFailures += 1;
-      if (consecutiveFailures >= 3 || Date.now() - startedAt > 15 * 60 * 1000) {
+      if (consecutiveFailures >= 3) {
         clearInterval(interval);
         state.blastJob = null;
         if (state.active === "blast") render();
-        showToast("Blast analysis status could not be read. Please run the analysis again.");
+        showToast("Blast analysis status could not be read after repeated connection failures. Please run the analysis again.");
       }
     }
   }, 3000);
 }
 
 function renderBlast() {
-  const savedBlastAnalyses = newestFirstByCreatedAt(state.blastAnalyses);
-  const latest = state.blastResultsCleared
-    ? null
-    : state.activeBlastAnalysis
-      ? state.activeBlastAnalysis
-    : state.activeBlastAnalysisId
-      ? savedBlastAnalyses.find((item) => item.id === state.activeBlastAnalysisId) || savedBlastAnalyses[0]
-      : savedBlastAnalyses[0];
+  const blastClientId = selectedBlastClientId();
+  state.blastClientId = blastClientId;
+  const selectedClient = state.clients.find((client) => client.id === blastClientId);
+  const latest = selectedBlastAnalysis(blastClientId);
   const clearAction = latest
     ? `<button class="btn secondary" type="button" data-clear-blast-result>Clear loaded result</button>`
     : "";
@@ -884,35 +991,61 @@ function renderBlast() {
         </div>
         <form id="blast-form" class="grid">
           <div class="form-grid three">
-            <div class="field"><label>Client</label><select name="clientId" required>${requireClientOptions()}</select></div>
-            <div class="field"><label>Start date</label><input type="date" name="dateStart" required value="${firstDayOfMonth()}"></div>
-            <div class="field"><label>End date</label><input type="date" name="dateEnd" required value="${todayIso()}"></div>
-            <div class="field"><label>Reply tag</label><input name="replyTag" required value="Replied to Blast"></div>
-            <div class="field"><label>Optional workflow name or ID</label><input name="workflowName" placeholder="BLAST - May Offer"></div>
-            <div class="field"><label>Blast message phrase</label><input name="messagePhrase" required placeholder="Distinctive wording from the outbound blast"></div>
+            <div class="field"><label>Client</label><select name="clientId" required ${state.blastJob ? "disabled" : ""}>${requireClientOptions(blastClientId)}</select></div>
+            <div class="field"><label>Start date</label><input type="date" name="dateStart" required value="${escapeHtml(blastDraftValue("dateStart", firstDayOfMonth()))}"></div>
+            <div class="field"><label>End date</label><input type="date" name="dateEnd" required value="${escapeHtml(blastDraftValue("dateEnd", todayIso()))}"></div>
+            <div class="field"><label>Reply tag</label><input name="replyTag" required value="${escapeHtml(blastDraftValue("replyTag", "Replied to Blast"))}"></div>
+            <div class="field"><label>Optional workflow name or ID</label><input name="workflowName" placeholder="BLAST - May Offer" value="${escapeHtml(blastDraftValue("workflowName"))}"></div>
+            <div class="field"><label>Blast message phrase</label><input name="messagePhrase" required placeholder="Distinctive wording from the outbound blast" value="${escapeHtml(blastDraftValue("messagePhrase"))}"></div>
           </div>
           <div class="actions"><button class="btn primary" type="submit" ${state.clients.length && !state.blastJob ? "" : "disabled"}>${icons.play} ${state.blastJob ? "Running..." : "Run analysis"}</button></div>
         </form>
       </section>
       ${state.blastJob
-        ? `<section class="panel"><div class="panel-header"><div><h2>Analysis in progress</h2><p id="blast-job-progress">${state.blastJob.progress.total > 0 ? `Classifying contacts... ${state.blastJob.progress.done} of ${state.blastJob.progress.total}` : "Fetching contacts from HighLevel..."}</p></div></div></section>`
-        : latest ? renderBlastResult(latest, rows, clearAction) : `<div class="empty">${state.blastResultsCleared ? "No blast analysis is loaded. Run analysis to show fresh results." : "No blast analysis has been run yet."}</div>`
+        ? renderBlastProgress(state.blastJob.progress)
+        : latest
+          ? renderBlastResult(latest, rows, clearAction)
+          : `<div class="empty">${state.blastResultsCleared
+            ? "No blast analysis is loaded. Run analysis to show fresh results."
+            : `No saved blast analysis exists for ${escapeHtml(selectedClient?.name || "the selected client")}. Run an analysis to create one.`}</div>`
       }
     </div>
   `, "Blast Analyzer", "Analyze blast replies independently from the monthly maintenance check.");
 
-  document.querySelector("#blast-form").addEventListener("submit", async (event) => {
+  const blastForm = document.querySelector("#blast-form");
+  blastForm.addEventListener("input", (event) => {
+    if (event.target.name) state.blastDraft[event.target.name] = event.target.value;
+  });
+  blastForm.querySelector('[name="clientId"]').addEventListener("change", (event) => {
+    state.blastClientId = event.target.value;
+    state.blastDraft.clientId = event.target.value;
+    state.activeBlastAnalysisId = "";
+    state.activeBlastAnalysis = null;
+    state.blastResultsCleared = false;
+    render();
+  });
+  blastForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.currentTarget));
     try {
+      state.blastClientId = body.clientId;
+      state.blastDraft = body;
       state.blastResultsCleared = false;
       state.activeBlastAnalysis = null;
+      state.activeBlastAnalysisId = "";
       const payload = await api("/api/blasts/run", { method: "POST", body: JSON.stringify(body) });
       if (payload.jobId) {
-        state.blastJob = { jobId: payload.jobId, status: "running", progress: { done: 0, total: 0 } };
+        state.blastJob = {
+          jobId: payload.jobId,
+          clientId: body.clientId,
+          status: "running",
+          progress: normalizedBlastProgress()
+        };
         render();
         pollBlastJob(payload.jobId);
       } else {
+        state.blastClientId = payload.analysis.clientId;
+        state.blastDraft = { ...state.blastDraft, clientId: payload.analysis.clientId };
         state.activeBlastAnalysis = payload.analysis;
         state.blastAnalyses = newestFirstByCreatedAt([
           payload.analysis,

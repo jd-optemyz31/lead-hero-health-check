@@ -29,7 +29,12 @@ import {
   contactDndStatus,
   selectAnchoredBlastThread
 } from "./src/blast-thread.mjs";
-import { collectPagedHighLevelItems, dailyUtcWindows } from "./src/highlevel-pagination.mjs";
+import { blastProgress } from "./src/blast-progress.mjs";
+import {
+  collectCursorPagedHighLevelItems,
+  collectPagedHighLevelItems,
+  dailyUtcWindows
+} from "./src/highlevel-pagination.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -829,6 +834,27 @@ function extractContacts(payload) {
   return findFirstArrayByKeys(payload, ["contacts", "items", "results", "data"]);
 }
 
+function findContactPaginationMeta(value, depth = 0) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 4) return {};
+  if (
+    value.startAfter !== undefined
+    || value.startAfterId !== undefined
+    || value.nextStartAfter !== undefined
+    || value.nextStartAfterId !== undefined
+    || value.start_after !== undefined
+    || value.start_after_id !== undefined
+    || value.next_start_after !== undefined
+    || value.next_start_after_id !== undefined
+  ) {
+    return value;
+  }
+  for (const nested of Object.values(value)) {
+    const found = findContactPaginationMeta(nested, depth + 1);
+    if (Object.keys(found).length) return found;
+  }
+  return {};
+}
+
 function extractMessages(payload) {
   return findFirstArrayByKeys(payload, ["messages", "items", "results", "data"]);
 }
@@ -957,6 +983,23 @@ function filterSearchedContacts(contacts, { dateStart, dateEnd, replyTag = "", c
     const matchesTag = trustServerTagFilter || contactHasTag(contact, replyTag);
     return matchesDate && matchesTag;
   });
+}
+
+function contactCursorFromPayload(payload, pageItems) {
+  const meta = findContactPaginationMeta(payload);
+  const lastContact = pageItems.at(-1);
+  const startAfter = meta.nextStartAfter
+    ?? meta.startAfter
+    ?? meta.next_start_after
+    ?? meta.start_after
+    ?? timestampOf(lastContact || {});
+  const startAfterId = meta.nextStartAfterId
+    ?? meta.startAfterId
+    ?? meta.next_start_after_id
+    ?? meta.start_after_id
+    ?? contactId(lastContact || {});
+  if (!startAfter || !startAfterId) return null;
+  return { startAfter, startAfterId };
 }
 
 function hasAttribution(contact) {
@@ -1610,7 +1653,8 @@ async function highLevelSearchContacts(client, {
   replyTag = "",
   limit = 100,
   maxPages = 1,
-  createdDateFilter = true
+  createdDateFilter = true,
+  onPageProgress
 }) {
   const filters = [];
   if (replyTag) filters.push({ field: "tags", operator: "contains", value: replyTag });
@@ -1625,13 +1669,17 @@ async function highLevelSearchContacts(client, {
     });
   }
 
+  const offsetPageLimit = Math.min(maxPages, 100);
   const searchPages = (searchFilters) => collectPagedHighLevelItems({
     pageSize: limit,
-    maxPages,
-    failOnPageLimit: true,
-    pageLimitErrorMessage: "HighLevel returned more contacts than the Blast Analyzer safety limit. Narrow the account data or increase the reviewed contact-page limit before trusting this run.",
+    maxPages: offsetPageLimit,
+    failOnPageLimit: maxPages > 1,
+    pageLimitErrorMessage: "HighLevel offset pagination reached its 10,000-contact window.",
     itemId: contactId,
     extractItems: extractContacts,
+    onPage: onPageProgress
+      ? ({ page, itemCount }) => onPageProgress({ mode: "filtered", page, count: itemCount })
+      : undefined,
     fetchPage: (page, pageSize) => highLevelRequest(client, {
       method: "POST",
       endpointPath: "/contacts/search",
@@ -1654,11 +1702,34 @@ async function highLevelSearchContacts(client, {
     });
     if (filteredContacts.length || !replyTag) return filteredContacts;
   } catch (error) {
-    // Fall through to the unfiltered search below. Some HighLevel tag filters can fail
-    // or return no rows depending on account response shape.
+    // Fall through to the read-only cursor scan below. Some HighLevel tag filters
+    // can fail or return no rows depending on account response shape.
   }
 
-  return filterSearchedContacts(await searchPages([]), {
+  const cursorContacts = await collectCursorPagedHighLevelItems({
+    pageSize: limit,
+    maxPages,
+    failOnPageLimit: maxPages > 1,
+    pageLimitErrorMessage: "HighLevel returned more contacts than the Blast Analyzer 50,000-contact safety limit. Narrow the account data before trusting this run.",
+    missingCursorErrorMessage: "HighLevel did not provide a cursor for the next contact page, so the Blast Analyzer stopped instead of saving partial results.",
+    itemId: contactId,
+    extractItems: extractContacts,
+    extractCursor: contactCursorFromPayload,
+    onPage: onPageProgress
+      ? ({ page, itemCount }) => onPageProgress({ mode: "cursor", page, count: itemCount })
+      : undefined,
+    fetchPage: (cursor, pageSize) => highLevelRequest(client, {
+      method: "GET",
+      endpointPath: "/contacts/",
+      query: {
+        locationId: client.locationId,
+        limit: pageSize,
+        ...(cursor || {})
+      }
+    })
+  });
+
+  return filterSearchedContacts(cursorContacts, {
     dateStart,
     dateEnd,
     replyTag,
@@ -1716,14 +1787,16 @@ async function highLevelSearchOpportunities(client, { contactIdValue = "", dateS
   }
 }
 
-async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "" }) {
+async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "", onWindowProgress }) {
   const messages = [];
   const seenMessageIds = new Set();
   const maxPagesPerDay = 50;
   const pageLimit = 100;
   const retryableStatuses = new Set([401, 429, 500, 502, 503, 504]);
+  const windows = dailyUtcWindows(dateStart, dateEnd);
 
-  for (const window of dailyUtcWindows(dateStart, dateEnd)) {
+  for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
+    const window = windows[windowIndex];
     let cursor = "";
     for (let page = 0; page < maxPagesPerDay; page += 1) {
       let payload;
@@ -1764,6 +1837,13 @@ async function highLevelExportMessages(client, { dateStart, dateEnd, channel = "
         error.detail = "The selected day contains too many messages to analyze completely. Run a narrower date range.";
         throw error;
       }
+    }
+    if (onWindowProgress) {
+      await onWindowProgress({
+        done: windowIndex + 1,
+        total: windows.length,
+        messageCount: messages.length
+      });
     }
   }
   return messages.filter((message) => isWithinDateRange(message, dateStart, dateEnd));
@@ -2044,15 +2124,29 @@ function generateBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowN
 }
 
 async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag, workflowName, messagePhrase, onProgress }) {
+  if (onProgress) await onProgress(blastProgress("contacts", { count: 0 }));
   const contacts = await highLevelSearchContacts(client, {
     dateStart,
     dateEnd,
     replyTag,
     limit: 100,
     maxPages: 500,
-    createdDateFilter: false
+    createdDateFilter: false,
+    onPageProgress: ({ mode, count }) => onProgress?.(blastProgress("contacts", { mode, count }))
   });
-  const messages = await highLevelExportMessages(client, { dateStart, dateEnd });
+  const messageWindowCount = dailyUtcWindows(dateStart, dateEnd).length;
+  if (onProgress) await onProgress(blastProgress("messages", { done: 0, total: messageWindowCount }));
+  const messages = await highLevelExportMessages(client, {
+    dateStart,
+    dateEnd,
+    onWindowProgress: ({ done, total, messageCount }) => onProgress?.(blastProgress("messages", {
+      done,
+      total,
+      count: messageCount,
+      detail: `${done} of ${total} date windows exported; ${messageCount.toLocaleString()} messages loaded read-only.`
+    }))
+  });
+  if (onProgress) await onProgress(blastProgress("matching", { count: contacts.length }));
   const contactIds = new Set(contacts.map((contact) => contactId(contact)));
   const contactContexts = contacts.map((contact) => {
       const contactIdValue = contactId(contact);
@@ -2070,7 +2164,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
   const contactsWithMatchedBlast = contactContexts.filter((item) => item.blastFound);
   const contactsWithInboundReplies = contactContexts.filter((item) => item.blastFound && item.latest);
   const total = contactContexts.length;
-  if (onProgress) await onProgress({ done: 0, total });
+  if (onProgress) await onProgress(blastProgress("classifying", { done: 0, total }));
   let progressDone = 0;
   const replies = await mapWithConcurrency(contactContexts, 5, async ({
     contact,
@@ -2086,7 +2180,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
     const lastReplyDate = messageTimestamp(latest || latestCandidate) || "";
     if (!analysisState.eligible) {
       progressDone++;
-      if (onProgress) await onProgress({ done: progressDone, total });
+      if (onProgress) await onProgress(blastProgress("classifying", { done: progressDone, total }));
       return {
         id: crypto.randomUUID(),
         contactId,
@@ -2117,7 +2211,7 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
       dndStatus
     });
     progressDone++;
-    if (onProgress) await onProgress({ done: progressDone, total });
+    if (onProgress) await onProgress(blastProgress("classifying", { done: progressDone, total }));
     return {
       id: crypto.randomUUID(),
       contactId,
@@ -2213,13 +2307,29 @@ async function generateLiveBlastAnalysis({ client, dateStart, dateEnd, replyTag,
 async function runBlastJob(jobId, params) {
   const { user, client, ...analysisParams } = params;
   const metadata = { clientId: client.id, authUserId: user.id };
+  let latestProgress = blastProgress("initializing");
+  let progressWrite = Promise.resolve();
+  const reportProgress = (progress) => {
+    progressWrite = progressWrite.then(async () => {
+      latestProgress = {
+        ...progress,
+        percent: Math.max(latestProgress.percent || 0, progress.percent || 0)
+      };
+      await writeJob(jobId, { ...metadata, status: "running", progress: latestProgress });
+    });
+    return progressWrite;
+  };
   try {
-    await writeJob(jobId, { ...metadata, status: "running", progress: { done: 0, total: 0 } });
+    await reportProgress(latestProgress);
     const analysis = await generateLiveBlastAnalysis({
       ...analysisParams,
       client,
-      onProgress: (progress) => writeJob(jobId, { ...metadata, status: "running", progress })
+      onProgress: reportProgress
     });
+    await reportProgress(blastProgress("saving", {
+      done: analysis.replies.length,
+      total: analysis.replies.length
+    }));
     const freshStore = await readStore(user);
     freshStore.blastAnalyses.unshift(analysis);
     await persistBlastAnalysis(freshStore, analysis);
@@ -2231,7 +2341,15 @@ async function runBlastJob(jobId, params) {
       targetId: analysis.id,
       message: "Live blast analysis completed."
     });
-    await writeJob(jobId, { ...metadata, status: "done", progress: { done: analysis.replies.length, total: analysis.replies.length }, analysis });
+    await writeJob(jobId, {
+      ...metadata,
+      status: "done",
+      progress: blastProgress("done", {
+        done: analysis.replies.length,
+        total: analysis.replies.length
+      }),
+      analysis
+    });
   } catch (error) {
     await Promise.all([
       writeAuditLog({
@@ -2253,7 +2371,18 @@ async function runBlastJob(jobId, params) {
         message: `HighLevel read failed during blast analysis${error.status ? ` with HTTP ${error.status}` : ""}.`
       })
     ]).catch(() => {});
-    await writeJob(jobId, { ...metadata, status: "error", error: error.detail || error.message || "Blast analysis failed.", progress: { done: 0, total: 0 } }).catch(() => {});
+    await writeJob(jobId, {
+      ...metadata,
+      status: "error",
+      error: error.detail || error.message || "Blast analysis failed.",
+      progress: {
+        ...latestProgress,
+        phase: "error",
+        phaseLabel: "Stopped",
+        verb: "[Analysis stopped...]",
+        detail: "The Blast Analyzer stopped before completing this run."
+      }
+    }).catch(() => {});
   }
 }
 

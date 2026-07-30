@@ -583,6 +583,18 @@ If `New form submission` is missing but workflow messages exist, the tool should
 
 The Blast Analyzer must use the selected date range to avoid mixing older replies with the current blast.
 
+### Large HighLevel Account
+
+If the advanced tag search is unavailable or unreliable, the read-only local-tag fallback must use HighLevel contact cursors rather than requesting page-number offsets beyond the API's 10,000-result window. The tool may scan at most 50,000 contacts and must stop with a clear incomplete-scan error if HighLevel omits or repeats a required cursor. Partial contact populations must never be saved as completed Blast analyses.
+
+Long but responsive background jobs should remain observable: the browser may stop only for a final server error or repeated status-connection failures, not an arbitrary 15-minute local timer.
+
+Blast job progress records may contain only sanitized phase names, contextual Lead Hero verbs, percentages, and aggregate counts. They must never include contact names, message text, raw conversations, HighLevel tokens, AI keys, Supabase credentials, or other secrets. The interface must use marketing-message analysis language and must not present itself as an explosives, weapons, or demolition analysis tool.
+
+### Blast Result From Another Client
+
+Although both application roles can access all configured clients, the Blast Analyzer must preserve client context. The frontend must filter saved analyses by the selected `clientId` and reject an active in-memory result whose `clientId` does not match. Changing the Blast client should show that client's newest saved analysis or a client-specific empty state, never a result belonging to another client.
+
 ### Ambiguous `stop` Language
 
 Only a standalone `STOP`, `please stop`, or an unambiguous stop-contact instruction is a message-level opt-out. Ordinary positive language such as `I'll stop by tomorrow` must not be classified as Opt-out. Read-only HighLevel overall/channel DND remains an independent deterministic opt-out signal.

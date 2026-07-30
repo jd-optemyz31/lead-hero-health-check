@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
 
 const root = new URL("../", import.meta.url);
 
@@ -49,6 +50,67 @@ test("HighLevel request call sites contain no mutation methods", async () => {
   const callPattern = /highLevelRequest\(client,\s*\{[\s\S]{0,220}?method:\s*"(PUT|PATCH|DELETE)"/g;
   assert.doesNotMatch(server, callPattern);
   assert.match(server, /assertHighLevelReadOnly\(method, endpointPath\)/);
+});
+
+test("Blast Analyzer only displays analyses for the selected client", async () => {
+  const frontend = await source("public/app.js");
+
+  assert.match(frontend, /\.filter\(\(item\) => item\.clientId === clientId\)/);
+  assert.match(frontend, /state\.activeBlastAnalysis\?\.clientId === clientId/);
+  assert.match(frontend, /requireClientOptions\(blastClientId\)/);
+  assert.match(frontend, /state\.blastClientId = event\.target\.value/);
+  assert.match(frontend, /No saved blast analysis exists for/);
+  assert.doesNotMatch(frontend, /Date\.now\(\) - startedAt > 15 \* 60 \* 1000/);
+
+  const selectionFunctions = frontend.slice(
+    frontend.indexOf("function timestampValue"),
+    frontend.indexOf("function blastDraftValue")
+  );
+  const context = {
+    state: {
+      blastResultsCleared: false,
+      activeBlastAnalysisId: "analysis-a",
+      activeBlastAnalysis: {
+        id: "analysis-a",
+        clientId: "client-a",
+        createdAt: "2026-07-31T12:00:00.000Z"
+      },
+      blastAnalyses: [
+        {
+          id: "analysis-a",
+          clientId: "client-a",
+          createdAt: "2026-07-31T12:00:00.000Z"
+        },
+        {
+          id: "analysis-b-old",
+          clientId: "client-b",
+          createdAt: "2026-07-30T12:00:00.000Z"
+        },
+        {
+          id: "analysis-b-new",
+          clientId: "client-b",
+          createdAt: "2026-07-31T11:00:00.000Z"
+        }
+      ]
+    }
+  };
+
+  runInNewContext(selectionFunctions, context);
+  const selected = runInNewContext('selectedBlastAnalysis("client-b")', context);
+  assert.equal(selected.id, "analysis-b-new");
+  context.state.blastResultsCleared = true;
+  assert.equal(runInNewContext('selectedBlastAnalysis("client-b")', context), null);
+});
+
+test("Blast Analyzer renders an accessible phased progress indicator", async () => {
+  const frontend = await source("public/app.js");
+  const styles = await source("public/styles.css");
+
+  assert.match(frontend, /role="progressbar"/);
+  assert.match(frontend, /aria-valuenow/);
+  assert.match(frontend, /blast-progress-fill/);
+  assert.match(frontend, /updateBlastProgress\(job\.progress\)/);
+  assert.match(styles, /prefers-reduced-motion:\s*reduce/);
 });
 
 test("Admin and User migration preserves browser revocations and global client access", async () => {

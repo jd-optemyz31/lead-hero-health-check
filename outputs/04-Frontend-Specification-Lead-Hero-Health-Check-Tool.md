@@ -165,7 +165,7 @@ Table columns:
 - Method
 - Review status
 
-Saved blast analyses should be sorted newest first in selection controls. Option labels should include client, saved date/time, analysis date range, reply tag, and source where practical. Clearing a loaded Blast Analyzer result should only hide the current on-screen result; it must not delete the saved analysis from storage.
+Saved blast analyses should be sorted newest first in selection controls. Option labels should include client, saved date/time, analysis date range, reply tag, and source where practical. The result area is scoped to the Blast form's selected client: changing the client immediately shows only that client's newest saved analysis, or an empty state naming the selected client when it has no analysis. A result from another client must never remain visible. The selected client and entered Blast form values should survive normal Blast-view re-renders. While a submitted analysis is running, its client selector is locked and the completed result restores the submitted client context. Clearing a loaded Blast Analyzer result should only hide the current on-screen result; it must not delete the saved analysis from storage.
 
 ### Monthly Check
 
@@ -526,11 +526,16 @@ Long-running checks should show step progress:
 Because live blast analysis runs as a background job, the Blast Analyzer has its own in-progress state:
 
 - After submitting the form, the Run Analysis button changes to "Running..." and becomes disabled.
-- A panel replaces the results area showing "Fetching contacts from HighLevel..." while the server pulls HighLevel data.
-- Once contacts are fetched, the panel updates to "Classifying contacts... X of Y" and counts up as each contact is classified.
+- A branded progress panel replaces the results area with an overall percentage, gold progress bar, current phase, contextual action verb, detail, and phase-specific count.
+- The real phases are Preparing, Contact scan, Conversation export, Blast matching, Reply classification, Saving, and Complete.
+- Contextual verbs use bracketed Lead Hero language such as `[Sweeping contact pages...]`, `[Gathering conversation trails...]`, `[Anchoring outbound blast messages...]`, and `[Reading reply intent...]`. Do not use explosives or demolition terminology.
+- Contact scanning shows contacts inspected, conversation export shows completed date windows, and classification shows reviewed versus total tagged contacts.
+- The progressbar must expose `aria-valuemin`, `aria-valuemax`, `aria-valuenow`, and descriptive `aria-valuetext`. Its pulse and shimmer animations must stop when the user prefers reduced motion.
 - When the job completes, the results appear automatically and the button re-enables.
 - If the job errors, an error toast is shown and the button re-enables.
 - If the read-only contact scan reaches its 50,000-contact safety ceiling, show a clear incomplete-scan error and do not display the partial population as a completed analysis.
+- Do not describe HighLevel's 10,000-result page-offset restriction as a generic timeout. The server should continue the read-only fallback with contact cursors; only a missing/repeated cursor or the 50,000-contact ceiling should produce an incomplete-scan error.
+- Continue polling for as long as the server returns a readable `running` job. Do not abandon a healthy large-account analysis after a fixed 15-minute browser timeout; stop only on a final job error or three consecutive status-connection failures.
 
 ## Validation Rules
 
